@@ -1,6 +1,6 @@
 {
   "framework_base": "a7459cddbe2a869477b0cd5530da8963cf9b5d7d",
-  "patch_sha256": "f5d8992b13e51bbf9c9483b122c8575e4991bdf72bd4f09a123cb544ca67a2ce",
+  "patch_sha256": "77fe8824df0ec3401b45ac367cadcd1c7d5839fa4c0b9a1825138956cc29542d",
   "paths": [
     "docs/beetle-linux.md",
     "docs/beetle-oracle.md",

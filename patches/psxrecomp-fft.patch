@@ -1090,7 +1090,7 @@ index c36f0169..9f8a1f2e 100644
  
  class ShardCandidateCapacityError(RuntimeError):
 diff --git a/tools/package_setup_host.sh b/tools/package_setup_host.sh
-index 977802e3..913d2711 100755
+index 977802e3..c16e10e7 100755
 --- a/tools/package_setup_host.sh
 +++ b/tools/package_setup_host.sh
 @@ -212,6 +212,11 @@ for cand in \
@@ -1105,6 +1105,35 @@ index 977802e3..913d2711 100755
    if [[ -f "${cand}" ]]; then
      EXE="${cand}"
      break
+@@ -444,6 +449,10 @@ copy_tree_filtered "${ROOT}/psxrecomp" "${STAGE}/psxrecomp" \
+   --exclude '.git' \
+   --exclude 'recompiler/build' \
+   --exclude 'generated' \
++  --exclude '*.mcd' \
++  --exclude '*.mcr' \
++  --exclude '*.sav' \
++  --exclude '*.state' \
+   --exclude '__pycache__' \
+   --exclude 'build' \
+   --exclude 'build-*'
+@@ -456,6 +465,17 @@ copy_tree_filtered "${ROOT}/recomp-ui" "${STAGE}/recomp-ui" \
+ # Never ship game generated C or common disc working trees.
+ rm -rf "${STAGE}/generated" "${STAGE}/bpe" "${STAGE}/motk" "${STAGE}/disc"
+ 
++# A framework checkout may carry local or tracked test cards. They are user
++# state and must never enter an owned-input setup kit on any platform. Keep a
++# post-copy gate as well as rsync exclusions so fallback staging fails closed.
++STRAY_CARDS="$(find "${STAGE}" -type f \( -iname '*.mcd' -o -iname '*.mcr' \
++  -o -iname '*.sav' -o -iname '*.state' \) -print 2>/dev/null || true)"
++if [[ -n "${STRAY_CARDS}" ]]; then
++  echo "error: memory-card/save files entered the setup package:" >&2
++  echo "${STRAY_CARDS}" >&2
++  exit 1
++fi
++
+ STAGE_SDK="${SCRIPT_DIR}/stage_setup_sdk.sh"
+ if [[ ! -f "${STAGE_SDK}" ]]; then
+   echo "error: missing ${STAGE_SDK}" >&2
 diff --git a/docs/beetle-oracle.md b/docs/beetle-oracle.md
 new file mode 100644
 --- /dev/null
