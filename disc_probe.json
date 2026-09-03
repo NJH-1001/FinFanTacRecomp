@@ -1,0 +1,40 @@
+{
+  "cue_path": "disc/Final Fantasy Tactics (USA).cue",
+  "cue_name": "Final Fantasy Tactics (USA).cue",
+  "bin_name": "Final Fantasy Tactics (USA).bin",
+  "track_count": 1,
+  "data_track_size": 541315152,
+  "data_track_md5": "b156ba386436d20fd5ed8d37bab6b624",
+  "data_track_sha1": "2b5d4db3229cdc7bbd0358b95fcba33dddae8bba",
+  "data_track_crc32": "377f6510",
+  "boot_exe": "SCUS_942.21",
+  "serial": "SCUS-94221",
+  "serial_exe": "SCUS_942.21",
+  "volume_id": "FINALFANTASYTACTICS",
+  "display_name": "Final Fantasy Tactics",
+  "load_address": "0x80010000",
+  "entry_pc": "0x80010A30",
+  "text_size": "0x00056800",
+  "stack_base": "0x801FFFF0",
+  "require_cue": true,
+  "required_disc_fp": "0c61a2587348771d1c9c5875b77fe98e51e546745d85098b0c1c9767adb0f49f",
+  "boot_exe_sha256": "287169026029ea8ff80b9d4e2bdfd8a401e828b7cf7544e0a22c19d41b6cc562",
+  "seed_count": 433,
+  "warnings": [],
+  "notes": [
+    "entry_pc/load_address/text_size/stack_base taken from PS-X EXE header.",
+    "seeds are first-pass boot-EXE JAL targets (+ entry); expect to grow as overlays / runtime paths are discovered.",
+    "required_disc_fp is psxrecomp-toc-v1 (matches runtime DiscIdentity)."
+  ],
+  "reference_url": "https://redump.info/disc/55",
+  "reference_verified_fields": [
+    "data_track_size",
+    "data_track_crc32",
+    "data_track_md5",
+    "data_track_sha1",
+    "track_count",
+    "serial",
+    "volume_id"
+  ],
+  "seed_provenance": "Initial JAL target scan plus EXE entry; candidates, not Ghidra-verified function boundaries"
+}

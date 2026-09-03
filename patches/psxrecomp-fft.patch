@@ -1,0 +1,5357 @@
+diff --git a/docs/beetle-linux.md b/docs/beetle-linux.md
+index 1d035881..f0cbdfec 100644
+--- a/docs/beetle-linux.md
++++ b/docs/beetle-linux.md
+@@ -9,30 +9,26 @@ ping/screenshot served over the TCP debug protocol).
+ `runtime/src/beetle_libretro.cpp` targets the C++ beetle-psx tree. Upstream
+ master has since been converted to plain C (`libretro.cpp` -> `libretro.c`,
+ `PS_CPU` class dropped), which no longer compiles against our integration.
+-Pin the checkout to the last compatible commit — the same base
+-`docs/beetle_wtrace_hook.patch` was generated from:
++Pin the checkout to the compatible commit and apply the consolidated hooks.
++See [Restoring the independent Beetle oracle](beetle-oracle.md) for Windows
++build and TCP verification instructions.
+ 
+ ```bash
+ git clone https://github.com/libretro/beetle-psx-libretro.git beetle-psx
+ cd beetle-psx
+-git checkout 5759277b          # "audit pass" — last C++-tree base we target
+-patch -p1 < ../docs/beetle_wtrace_hook.patch
+-patch -p1 < ../docs/beetle_sio_trace_hook.patch
+-patch -p1 < ../docs/beetle_cdcmd_trace_hook.patch
+-# cdcmd re-inserts the wtrace globals + typedefs — drop the duplicate block
+-# in libretro.cpp / mednafen/psx/psx.h if the build errors on redefinition.
+-# Also needed (not yet in docs/*.patch): rtrace/irq callbacks, guest-cycle
+-# accumulator, PS_CDC::PSXRecomp_GetDecodeVolume, cdc/dma irq peeks. Apply
+-# from a prior local beetle-psx tree or re-land those hooks by hand.
++git checkout --detach 5759277be50052b9f3f388578bf56cc7899d833f
++git apply ../docs/beetle_oracle_hooks.patch
+ ```
+ 
+-`beetle_cdcmd_trace_hook.patch` adds a CD-command trace callback (fires per
++The consolidated patch adds a CD-command trace callback (fires per
+ command dispatch in cdc.cpp) exposed as the `cdrom_cmd_dump` / `cdrom_cmd_reset`
+ debug commands — used to oracle-diff the Kula World CD read sequence.
+ 
+-`beetle_sio_trace_hook.patch` adds `FrontIO::SetSIOTraceCallback` (fires per
++It also adds `FrontIO::SetSIOTraceCallback` (fires per
+ completed SIO byte exchange) — an integration hook beetle_libretro.cpp needs
+-that predated the committed wtrace patch.
++that predated the committed wtrace patch. The formerly missing read, IRQ,
++cycle, exception, SPU and CDC/DMA observation hooks are included as well.
++Do not apply the older partial patches on top of the consolidated patch.
+ 
+ ## Build
+ 
+diff --git a/recompiler/CMakeLists.txt b/recompiler/CMakeLists.txt
+index 460c8d2c..669edec4 100644
+--- a/recompiler/CMakeLists.txt
++++ b/recompiler/CMakeLists.txt
+@@ -195,16 +195,22 @@ endif()
+ set(PSXRECOMP_CODEGEN_HASH_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
+ include(${CMAKE_CURRENT_SOURCE_DIR}/../runtime/codegen_hash_sources.cmake)
+ set(_baked_hash_hdr ${CMAKE_CURRENT_BINARY_DIR}/psxrecomp_baked_codegen_hash.h)
++# Standalone emitter builds also run overlay integration tests. Those tests
++# compile against the runtime headers before any runtime target has been built.
++set(_overlay_hash_hdr ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/include/overlay_codegen_hash.h)
+ add_custom_command(
+-    OUTPUT  ${_baked_hash_hdr}
++    OUTPUT  ${_baked_hash_hdr} ${_overlay_hash_hdr}
+     COMMAND ${CMAKE_COMMAND} -DOUT=${_baked_hash_hdr}
+             "-DSRCS=${PSXRECOMP_CODEGEN_HASH_SRCS}"
+             -P ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/hash_codegen.cmake
++    COMMAND ${CMAKE_COMMAND} -DOUT=${_overlay_hash_hdr}
++            "-DSRCS=${PSXRECOMP_CODEGEN_HASH_SRCS}"
++            -P ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/hash_codegen.cmake
+     DEPENDS ${PSXRECOMP_CODEGEN_HASH_SRCS}
+             ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/hash_codegen.cmake
+     COMMENT "Hashing codegen sources -> psxrecomp_baked_codegen_hash.h"
+     VERBATIM)
+-add_custom_target(psxrecomp_baked_codegen_hash DEPENDS ${_baked_hash_hdr})
++add_custom_target(psxrecomp_baked_codegen_hash DEPENDS ${_baked_hash_hdr} ${_overlay_hash_hdr})
+ add_dependencies(psxrecomp-game psxrecomp_baked_codegen_hash)
+ # Force main_psx.cpp to recompile whenever the hash header content changes
+ # (same OBJECT_DEPENDS hardening as runtime.cmake — __has_include depfile gap).
+diff --git a/recompiler/tests/test_aot_overlay_discovery.py b/recompiler/tests/test_aot_overlay_discovery.py
+index 77d97acb..c8b8984a 100644
+--- a/recompiler/tests/test_aot_overlay_discovery.py
++++ b/recompiler/tests/test_aot_overlay_discovery.py
+@@ -3411,17 +3411,11 @@ def check_full_candidate_cli_fastpath(recompiler):
+ 
+         game_toml = ROOT / 'tools' / 'cycle_testrom' / 'game.toml'
+         cache_root = tmp / 'cache'
+-        # MUST match compile_overlays.py's cache_dir exactly, including the
+-        # _gc<config-hash> component — a prefill staged one directory off is
+-        # simply not found, and the run then compiles for real instead of
+-        # taking the fast path this test exists to assert. This drifted when
+-        # the config hash was added to the cache path and went unnoticed
+-        # because the test could not get past the BIOS-profile probe to reach
+-        # the assertion (issue #72).
++        # Use the production namespace formatter, including the flavor. A
++        # prefill in a different namespace does not exercise cache saturation.
+         leaf = (cache_root / 'CYCT-00101' / 'gcc' / MOD.cache_arch_abi() /
+-                f'cg{MOD.codegen_ver(str(runtime_include))}_'
+-                f'{MOD.codegen_hash(str(runtime_include)):08x}_'
+-                f'gc{MOD.overlay_config_hash(recompiler, str(game_toml)):08x}')
++                MOD.cache_tag(str(runtime_include), recompiler,
++                              str(game_toml), 0))
+         leaf.mkdir(parents=True)
+         pair_id = 0x123456789ABCDEF0
+         captured_bytes = b'\x08\x00\xE0\x03\x00\x00\x00\x00'
+diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
+index c506668f..93a0af4a 100644
+--- a/runtime/CMakeLists.txt
++++ b/runtime/CMakeLists.txt
+@@ -403,6 +403,10 @@ if(BUILD_TESTING)
+     target_include_directories(gpu_sw_edges_test PRIVATE src)
+     add_test(NAME gpu_sw_edges_test COMMAND gpu_sw_edges_test)
+ 
++    add_executable(gpu_wide_gradient_test tests/test_gpu_wide_gradient.c)
++    target_include_directories(gpu_wide_gradient_test PRIVATE src)
++    add_test(NAME gpu_wide_gradient_test COMMAND gpu_wide_gradient_test)
++
+     add_executable(gpu_vk_upload_alignment_test
+         tests/test_gpu_vk_upload_alignment.c)
+     target_include_directories(gpu_vk_upload_alignment_test PRIVATE src)
+@@ -502,6 +506,22 @@ if(BUILD_TESTING)
+ 
+     find_package(Python3 COMPONENTS Interpreter)
+     if(Python3_Interpreter_FOUND)
++        add_library(gpu_sw_probe SHARED src/gpu_sw_renderer.c
++                    src/gpu_vram_dirty.c tests/gpu_sw_probe_support.c)
++        target_include_directories(gpu_sw_probe PRIVATE include src)
++        set_target_properties(gpu_sw_probe PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
++        if(NOT MSVC)
++            target_link_libraries(gpu_sw_probe PRIVATE m)
++        endif()
++        add_test(NAME gpu_sw_beetle_raster_test
++                 COMMAND ${Python3_EXECUTABLE}
++                   ${CMAKE_CURRENT_SOURCE_DIR}/../tools/verify_gpu_raster.py
++                   $<TARGET_FILE:gpu_sw_probe> --reference
++                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/gpu_raster_beetle.json)
++        add_test(NAME gpu_wide_gradient_surface_test
++                 COMMAND ${Python3_EXECUTABLE}
++                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gpu_wide_gradient_surface.py
++                   $<TARGET_FILE:gpu_sw_probe>)
+         add_test(NAME frame_interpolation_context_ownership_test
+                  COMMAND ${Python3_EXECUTABLE}
+                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_frame_interpolation_context_ownership.py)
+@@ -651,6 +671,7 @@ if(NOT MSVC AND EXISTS "${BEETLE_LIB}")
+     add_executable(psx-beetle
+         src/beetle_main.cpp
+         src/beetle_libretro.cpp
++        src/beetle_observe.cpp
+         src/beetle_debug_server.c
+         src/frame_pacing.c
+         src/host_time.c
+@@ -669,6 +690,8 @@ if(NOT MSVC AND EXISTS "${BEETLE_LIB}")
+ 
+     target_compile_definitions(psx-beetle PRIVATE
+         PSX_BEETLE_BUILD=1
++        # Match the core's public C++ class layouts (notably PS_CDC).
++        __LIBRETRO__
+         DEFAULT_DEBUG_PORT=4380
+         $<$<BOOL:${PSX_SDL3}>:PSX_SDL3=1>
+     )
+diff --git a/runtime/include/gpu_render.h b/runtime/include/gpu_render.h
+index ace31f11..bbf97ff9 100644
+--- a/runtime/include/gpu_render.h
++++ b/runtime/include/gpu_render.h
+@@ -116,6 +116,10 @@ void gr_wide_disable_target(void);
+ void gr_wide_clear(int base_x, int y, int h, uint16_t color);
+ /* sides: bit 0 = left synthetic margin, bit 1 = right. */
+ void gr_wide_clear_margins(int base_x, int y, int h, uint16_t color, int sides);
++/* Continue an already-rendered vertical gradient into reveal strips, retaining
++ * the backend's color precision and every supersampled row. */
++void gr_wide_extend_gradient(int base_x, int y, int h);
++void gr_wide_flat_overlay(int y, int h, uint16_t color);
+ int  gr_wide_dump_full(uint32_t *out, int cap_pixels, int *ow, int *oh, int base_x);
+ int  gr_render_wide_display(uint32_t *out, int pitch, int base_x,
+                             int disp_y, int disp_h);
+@@ -192,6 +196,8 @@ typedef struct GpuRenderBackend {
+     void (*wide_disable_target)(void);
+     void (*wide_clear)(int base_x, int y, int h, uint16_t color);
+     void (*wide_clear_margins)(int base_x, int y, int h, uint16_t color, int sides);
++    void (*wide_extend_gradient)(int base_x, int y, int h);
++    void (*wide_flat_overlay)(int y, int h, uint16_t color);
+     int  (*render_wide_display)(uint32_t *out, int pitch, int base_x,
+                                 int disp_y, int disp_h);
+     /* Dump the ENTIRE wide compositor surface for base_x (all double-buffer
+diff --git a/runtime/include/gpu_sw_renderer.h b/runtime/include/gpu_sw_renderer.h
+index b8cea0e3..23550d92 100644
+--- a/runtime/include/gpu_sw_renderer.h
++++ b/runtime/include/gpu_sw_renderer.h
+@@ -113,6 +113,8 @@ void sw_wide_set_target(int base_x);
+ void sw_wide_disable_target(void);
+ void sw_wide_clear(int base_x, int y, int h, uint16_t color);
+ void sw_wide_clear_margins(int base_x, int y, int h, uint16_t color, int sides);
++void sw_wide_extend_gradient(int base_x, int y, int h);
++void sw_wide_flat_overlay(int y, int h, uint16_t color);
+ /* MMX6 native-wide reveal-column tile: rasterize a 16x16 textured tile into the
+  * wide surface ONLY (canonical VRAM + hi-res mirror untouched). See definition. */
+ void sw_wide_emit_tile(int band_y, int x, int y, int u, int v,
+diff --git a/runtime/include/mod_plugins.h b/runtime/include/mod_plugins.h
+index a1e4645e..43eae197 100644
+--- a/runtime/include/mod_plugins.h
++++ b/runtime/include/mod_plugins.h
+@@ -118,6 +118,9 @@ int psx_mod_current_resource_path(const char* resource_id,
+  */
+ int psx_mod_set_fixed_display_aspect(uint32_t numerator,
+                                      uint32_t denominator);
++/* Extend opaque full-frame vertical-gradient backgrounds into native-wide
++ * margins. Samples rendered rows; canonical VRAM is never modified. */
++void psx_mod_set_vertical_gradient_reveal(int enabled);
+ /*
+  * Request resize-driven widescreen, capped at the supplied maximum aspect.
+  * The current fixed aspect continues to shape the initial game window, so a
+diff --git a/runtime/src/beetle_debug_server.c b/runtime/src/beetle_debug_server.c
+index 9cd7045b..f29ece2d 100644
+--- a/runtime/src/beetle_debug_server.c
++++ b/runtime/src/beetle_debug_server.c
+@@ -340,6 +340,31 @@ static void h_read_ram(int id, const char *json) {
+     free(out); free(buf);
+ }
+ 
++extern int beetle_gpu_probe(const uint32_t *words, unsigned count, uint16_t *pixels);
++static void h_gpu_probe(int id, const char *json) {
++    char input[1025];
++    uint32_t words[128];
++    uint16_t pixels[128 * 128];
++    if (!json_get_str(json, "words", input, sizeof(input))) {
++        send_err(id, "missing words"); return;
++    }
++    size_t n = strlen(input);
++    if (!n || n % 8) { send_err(id, "expected hexadecimal GP0 words"); return; }
++    for (size_t i = 0; i < n / 8; ++i) {
++        char word[9]; memcpy(word, input + i * 8, 8); word[8] = 0;
++        char *end; words[i] = (uint32_t)strtoul(word, &end, 16);
++        if (*end) { send_err(id, "invalid hexadecimal word"); return; }
++    }
++    if (!beetle_gpu_probe(words, (unsigned)(n / 8), pixels)) {
++        send_err(id, "GPU probe requires native scale and serializable core"); return;
++    }
++    char *hex = (char *)malloc(sizeof(pixels) * 2 + 1);
++    if (!hex) { send_err(id, "alloc"); return; }
++    for (int i = 0; i < 128 * 128; ++i) snprintf(hex + i * 4, 5, "%04x", pixels[i]);
++    send_fmt("{\"id\":%d,\"ok\":true,\"w\":128,\"h\":128,\"hex\":\"%s\"}\n", id, hex);
++    free(hex);
++}
++
+ static void h_press(int id, const char *json) {
+     int buttons = json_get_int(json, "buttons", -1);
+     int frames  = json_get_int(json, "frames", 2);
+@@ -1624,6 +1649,7 @@ static const CmdEntry CMDS[] = {
+     { "read_ram",              h_read_ram },
+     { "get_registers",         h_get_registers },
+     { "dump_ram",              h_read_ram },        /* alias, parity with native */
++    { "gpu_probe",             h_gpu_probe },
+     { "press",                 h_press },
+     { "set_input",             h_set_input },
+     { "clear_input",           h_clear_input },
+diff --git a/runtime/src/beetle_libretro.cpp b/runtime/src/beetle_libretro.cpp
+index cb654032..4bdc5de3 100644
+--- a/runtime/src/beetle_libretro.cpp
++++ b/runtime/src/beetle_libretro.cpp
+@@ -353,6 +353,7 @@ static void fntrace_callback(uint32_t caller_pc, uint32_t target_pc,
+ 
+ /* ---- Disk control + system dir ---- */
+ static char s_system_dir[4096] = ".";
++static bool s_use_openbios = false;
+ static struct retro_disk_control_callback     s_disk_cb     = {0};
+ static struct retro_disk_control_ext_callback s_disk_cb_ext = {0};
+ static int s_have_disk_cb     = 0;
+@@ -423,7 +424,7 @@ bool on_environment(unsigned cmd, void *data) {
+             if (var && var->key) {
+                 if (!strcmp(var->key, "beetle_psx_cpu_dynarec"))                { var->value = "disabled"; return true; }
+                 if (!strcmp(var->key, "beetle_psx_skip_bios"))                  { var->value = "disabled"; return true; }
+-                if (!strcmp(var->key, "beetle_psx_override_bios"))              { var->value = "disabled"; return true; }
++                if (!strcmp(var->key, "beetle_psx_override_bios"))              { var->value = s_use_openbios ? "openbios" : "disabled"; return true; }
+                 if (!strcmp(var->key, "beetle_psx_bios_region"))                { var->value = "any";      return true; }
+                 if (!strcmp(var->key, "beetle_psx_renderer"))                   { var->value = "software"; return true; }
+                 if (!strcmp(var->key, "beetle_psx_analog_toggle"))              { var->value = "disabled"; return true; }
+@@ -476,6 +477,8 @@ bool on_environment(unsigned cmd, void *data) {
+ /* ============================================================ */
+ 
+ extern "C" int beetle_init_with_disc(const char *bios_path, const char *disc_path);
++extern "C" void beetle_observe_init(void);
++extern "C" void psxrecomp_beetle_spu_event(unsigned, unsigned, unsigned, unsigned);
+ 
+ extern "C" int beetle_init(const char *bios_path) {
+     return beetle_init_with_disc(bios_path, NULL);
+@@ -492,6 +495,10 @@ extern "C" int beetle_init_with_disc(const char *bios_path, const char *disc_pat
+     strncpy(s_system_dir, bios_path, sizeof(s_system_dir) - 1);
+     char *last_sep = strrchr(s_system_dir, '/');
+     if (!last_sep) last_sep = strrchr(s_system_dir, '\\');
++    const char *bios_name = last_sep ? last_sep + 1 : s_system_dir;
++    s_use_openbios = !strcmp(bios_name, "openbios.bin") ||
++                    !strcmp(bios_name, "OPENBIOS.bin") ||
++                    !strcmp(bios_name, "OPENBIOS.BIN");
+     if (last_sep) *last_sep = '\0';
+     else strcpy(s_system_dir, ".");
+ 
+@@ -574,6 +581,8 @@ extern "C" int beetle_init_with_disc(const char *bios_path, const char *disc_pat
+     g_psxrecomp_irq_cb = irq_event_callback;
+     std::fprintf(stderr, "[psx-beetle] wtrace + fntrace + rtrace + irq callbacks registered\n");
+     g_psxrecomp_cdcmd_cb = cdcmd_trace_callback;
++    g_psxrecomp_spu_cb = psxrecomp_beetle_spu_event;
++    beetle_observe_init();
+     std::fprintf(stderr, "[psx-beetle] wtrace + fntrace + cdcmd callbacks registered\n");
+     std::fflush(stderr);
+ 
+@@ -611,6 +620,36 @@ extern "C" uint16_t beetle_vram_peek(uint32_t x, uint32_t y) {
+     return GPU_PeekRAM(((y & 0x1FF) << 10) | (x & 0x3FF));
+ }
+ 
++/* Isolated TCP GPU experiment. Restore the full core, including its FIFO and
++ * texture cache, before resuming. The procedural texture contains no game data. */
++extern "C" int beetle_gpu_probe(const uint32_t *words, unsigned count,
++                                 uint16_t *pixels) {
++    if (GPU_get_upscale_shift() != 0) return 0;
++    size_t size = retro_serialize_size();
++    void *state = malloc(size);
++    if (!state || !retro_serialize(state, size)) { free(state); return 0; }
++    GPU_Write(0, 4, 0x01000000);
++    for (unsigned a = 0; a < 1024 * 512; ++a) GPU_PokeRAM(a, 0);
++    for (unsigned v = 0; v < 256; ++v)
++        for (unsigned u = 0; u < 256; ++u)
++            GPU_PokeRAM(((v + 256) << 10) | (u + 512),
++                1 + ((u + v * 256) % 32767));
++    const uint32_t setup[] = {0x01000000, 0xe1000508, 0xe2000000,
++        0xe3000000, 0xe401fc7f, 0xe5000000, 0xe6000000};
++    for (uint32_t w : setup) { GPU.DrawTimeAvail = 1000000; GPU_WriteDMA(w, 0); }
++    for (unsigned i = 0; i < count; ++i) {
++        GPU.DrawTimeAvail = 1000000;
++        GPU_WriteDMA(words[i], 0);
++    }
++    for (unsigned y = 0; y < 128; ++y)
++        for (unsigned x = 0; x < 128; ++x)
++            pixels[y * 128 + x] = GPU_PeekRAM((y << 10) | x);
++    bool restored = retro_unserialize(state, size);
++    free(state);
++    if (!restored) abort(); // Never resume a guest with damaged diagnostic state.
++    return 1;
++}
++
+ extern "C" uint16_t beetle_get_pad(void) { return s_joypad; }
+ extern "C" uint32_t beetle_get_frame_count(void) { return s_frame_count; }
+ extern "C" int beetle_is_loaded(void) { return s_loaded ? 1 : 0; }
+@@ -1285,46 +1324,3 @@ extern "C" int beetle_history_get_snapshot(int slot, uint32_t *out_addr, int *ou
+     if (out_active) *out_active = s_beetle_snap_active[slot];
+     return 1;
+ }
+-
+-/* ---- cyc_watch / exc_ring stubs ----
+- * Full per-instruction sampling lives in a beetle-psx DebugMode CPUHook that
+- * was never checked into docs/*.patch. GPU/OT oracle work only needs these
+- * symbols to link; wire returns empty/unarmed until the hook patch lands. */
+-static uint32_t s_cw_anchor_raw = 0, s_cw_anchor_phys = 0;
+-static uint32_t s_cw_end_raw = 0, s_cw_end_phys = 0;
+-static uint32_t s_cw_max_hits = 0, s_cw_hits = 0;
+-static int s_cw_armed = 0;
+-
+-extern "C" void beetle_cyc_watch_arm(uint32_t anchor_raw, uint32_t end_raw, int n) {
+-    s_cw_anchor_raw = anchor_raw;
+-    s_cw_anchor_phys = anchor_raw & 0x1FFFFFFFu;
+-    s_cw_end_raw = end_raw;
+-    s_cw_end_phys = end_raw & 0x1FFFFFFFu;
+-    s_cw_max_hits = (n > 0) ? (uint32_t)n : 16u;
+-    s_cw_hits = 0;
+-    s_cw_armed = 1;
+-}
+-extern "C" void beetle_cyc_watch_clear(void) {
+-    s_cw_armed = 0; s_cw_hits = 0;
+-}
+-extern "C" void beetle_cyc_watch_get_state(uint32_t *anchor_raw, uint32_t *anchor_phys,
+-                                          uint32_t *end_raw, uint32_t *end_phys,
+-                                          uint32_t *max_hits, uint32_t *hits, int *armed) {
+-    if (anchor_raw)  *anchor_raw  = s_cw_anchor_raw;
+-    if (anchor_phys) *anchor_phys = s_cw_anchor_phys;
+-    if (end_raw)     *end_raw     = s_cw_end_raw;
+-    if (end_phys)    *end_phys    = s_cw_end_phys;
+-    if (max_hits)    *max_hits    = s_cw_max_hits;
+-    if (hits)        *hits        = s_cw_hits;
+-    if (armed)       *armed       = s_cw_armed;
+-}
+-extern "C" int beetle_cyc_watch_get(uint32_t i, uint32_t *hit_index, uint32_t *pc,
+-                                   unsigned long long *cyc) {
+-    (void)i; (void)hit_index; (void)pc; (void)cyc;
+-    return 0;
+-}
+-
+-extern "C" int retro_psxref_exc_ring_dump(char *out, int cap) {
+-    if (!out || cap < 32) return -1;
+-    return std::snprintf(out, (size_t)cap, "{\"ok\":true,\"entries\":[]}");
+-}
+diff --git a/runtime/src/beetle_main.cpp b/runtime/src/beetle_main.cpp
+index 06e4d483..b770dd1e 100644
+--- a/runtime/src/beetle_main.cpp
++++ b/runtime/src/beetle_main.cpp
+@@ -76,6 +76,7 @@ int main(int argc, char** argv) {
+      * on purpose: the BIOS status-poll writes it ~750x/frame and would flood the
+      * ring, evicting the meaningful cmd/ack/IRQ-enable writes. */
+     int wtrace_boot = 0;
++    bool headless = false;
+     /* Default debug port 4382: 4380 collides with psxref and other recomp
+      * projects' oracles (e.g. cdirecomp's CdiRuntime), and two LISTENers on
+      * the same port silently route connections to the wrong process. Give
+@@ -88,6 +89,8 @@ int main(int argc, char** argv) {
+             dbg_port = std::atoi(argv[++i]);
+         } else if (!std::strcmp(argv[i], "--wtrace-boot")) {
+             wtrace_boot = 1;
++        } else if (!std::strcmp(argv[i], "--headless")) {
++            headless = true;
+         } else if (argv[i][0] != '-') {
+             bios_path = argv[i];
+         }
+@@ -98,17 +101,17 @@ int main(int argc, char** argv) {
+         std::fprintf(stdout, "psx-beetle: loading disc from %s\n", disc_path);
+     }
+ 
+-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
++    if (SDL_Init(headless ? SDL_INIT_EVENTS | SDL_INIT_TIMER : SDL_INIT_VIDEO) != 0) {
+         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+         return 1;
+     }
+ 
+-    SDL_Window* win = SDL_CreateWindow(
++    SDL_Window* win = headless ? nullptr : SDL_CreateWindow(
+         "psx-beetle — Beetle PSX",
+         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+         640, 480,
+         SDL_WINDOW_SHOWN);
+-    if (!win) {
++    if (!headless && !win) {
+         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+         return 1;
+     }
+@@ -117,15 +120,15 @@ int main(int argc, char** argv) {
+      * the SDL main thread under heavy emulation load after the FMV-speed
+      * fix raised cycle throughput. OpenGL avoids the GDI path. */
+     SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
+-    SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+-    if (!ren) {
++    SDL_Renderer* ren = headless ? nullptr : SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
++    if (!headless && !ren) {
+         std::fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+         return 1;
+     }
+ 
+-    SDL_Texture* tex = SDL_CreateTexture(
++    SDL_Texture* tex = headless ? nullptr : SDL_CreateTexture(
+         ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 640, 512);
+-    if (!tex) {
++    if (!headless && !tex) {
+         std::fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
+         return 1;
+     }
+@@ -218,7 +221,7 @@ int main(int argc, char** argv) {
+ 
+         uint32_t* fb = nullptr;
+         unsigned w = 0, h = 0;
+-        if (beetle_get_framebuffer(&fb, &w, &h) && fb && w && h) {
++        if (!headless && beetle_get_framebuffer(&fb, &w, &h) && fb && w && h) {
+             if (w > 640) w = 640;
+             if (h > 512) h = 512;
+             for (unsigned y = 0; y < h; y++) {
+diff --git a/runtime/src/gpu.c b/runtime/src/gpu.c
+index 28b694ed..06b47eae 100644
+--- a/runtime/src/gpu.c
++++ b/runtime/src/gpu.c
+@@ -16,6 +16,7 @@
+ #include "mod_memory.h"
+ #include "gpu_primitive_reject.h"
+ #include "gpu_sw_renderer.h"
++#include "gpu_wide_gradient.h"
+ #include "gpu_vram_dirty.h"
+ #include "gpu_render.h"
+ #include "text_xlate.h"
+@@ -2237,6 +2238,10 @@ static void ws_nw_hud_shift_vertices(int32_t *vx, int count) {
+  * Transforms vx[0..3] IN PLACE (pre-draw_offset); returns 1 if it applied. */
+ static int ws_nw_backdrop = 0;
+ void gpu_ws_set_nw_backdrop(int on) { ws_nw_backdrop = on ? 1 : 0; }
++static int ws_nw_vertical_gradient = 0;
++void psx_mod_set_vertical_gradient_reveal(int enabled) {
++    ws_nw_vertical_gradient = enabled != 0;
++}
+ static int ws_nw_flat_backdrop = 0;
+ void gpu_ws_set_nw_flat_backdrop(int on) { ws_nw_flat_backdrop = on ? 1 : 0; }
+ int gpu_ws_nw_flat_backdrop_enabled(void) { return ws_nw_flat_backdrop; }
+@@ -3674,6 +3679,19 @@ static void gp0_exec_mono_quad(void) {
+             return;
+         }
+     }
++    /* Uniform screen filters may be trapezoids whose sloping edge lies
++     * outside the viewport. Preserve the canonical triangles exactly; replace
++     * only their wide mirror with one full-width filter pass. */
++    int wide_overlay = 0;
++    if (!rej_a && !rej_b && ws_native_wide_active() && !ws_local_viewport_cfg &&
++        !check_mask_bit && !set_mask_bit && ws_is_fb_base(draw_area_left) &&
++        draw_area_right - draw_area_left + 1 == ws_disp_w() &&
++        draw_area_bottom - draw_area_top + 1 == ws_disp_h() &&
++        psx_wide_flat_overlay_covers(vx, vy, draw_area_left, draw_area_top,
++                                    draw_area_right, draw_area_bottom)) {
++        wide_overlay = 1;
++        gr_wide_disable_target();
++    }
+     if (!rej_a) {
+         int32_t tx[3] = { vx[0], vx[1], vx[2] };
+         int32_t ty[3] = { vy[0], vy[1], vy[2] };
+@@ -3686,6 +3704,11 @@ static void gp0_exec_mono_quad(void) {
+         prepare_precise_triangle(3, 2, 4, tx, ty);
+         gr_draw_flat_triangle(vx[2], vy[2], vx[1], vy[1], vx[3], vy[3], color);
+     }
++    if (wide_overlay) {
++        ws_nw_sync_target();
++        gr_wide_flat_overlay((int)draw_area_top,
++                              (int)(draw_area_bottom - draw_area_top + 1), color);
++    }
+ }
+ 
+ /* Execute shaded triangle (GP0 0x30-0x33) — Gouraud shaded */
+@@ -3765,6 +3788,25 @@ static void gp0_exec_shaded_quad(void) {
+                                  vx[1], vy[1], c[1],
+                                  vx[3], vy[3], c[3]);
+     }
++    if (ws_nw_vertical_gradient && ws_native_wide_active() && !ws_local_viewport_cfg &&
++        !semi_trans && !check_mask_bit && !set_mask_bit && !rej_a && !rej_b &&
++        ws_is_fb_base(draw_area_left) &&
++        draw_area_right - draw_area_left + 1 == ws_disp_w()) {
++        GpuDisplayInfo di;
++        gpu_get_display_info(&di);
++        uint32_t rgb[4];
++        for (int i = 0; i < 4; ++i) rgb[i] = gp0_cmd_buf[i * 2] & 0xffffffu;
++        if (draw_area_bottom - draw_area_top + 1 == di.height &&
++            psx_wide_gradient_covers(vx, vy, rgb, draw_area_left, draw_area_top,
++                                     draw_area_right, draw_area_bottom)) {
++            /* Continue the actual rendered row into the reveal margins. This
++             * changes only the wide surface; canonical VRAM and all guest
++             * polygon coordinates remain untouched. Later scene primitives
++             * draw over the background normally. */
++            gr_wide_extend_gradient((int)draw_area_left, (int)draw_area_top,
++                                    (int)(draw_area_bottom - draw_area_top + 1));
++        }
++    }
+ }
+ 
+ /* Helper: build texpage word from GPU state for SW renderer.
+diff --git a/runtime/src/gpu_gl_renderer.c b/runtime/src/gpu_gl_renderer.c
+index 3312551e..896e3f68 100644
+--- a/runtime/src/gpu_gl_renderer.c
++++ b/runtime/src/gpu_gl_renderer.c
+@@ -2116,12 +2116,18 @@ static void wide_flat_rect_direct(int wx, int y, int ww, int h, uint16_t c, int
+         fx0,fy0,r,g,b,a,  fx1,fy0,r,g,b,a,  fx0,fy1,r,g,b,a,
+         fx1,fy0,r,g,b,a,  fx0,fy1,r,g,b,a,  fx1,fy1,r,g,b,a,
+     };
+-    /* Wide target: positions already wide-space so u_xoff = 0; full-width
+-     * scissor; u_xhalf = g_wide_w/2. */
++    /* Wide target: positions already wide-space so u_xoff = 0; scissor keeps
++     * the guest Y band and expands X; u_xhalf = g_wide_w/2. */
+     p_glBindFramebuffer(PSXGL_FRAMEBUFFER, g_wide_cur);
+     glViewport(0, 0, g_wide_w * s_scale, VRAM_H * s_scale);
+     glEnable(GL_SCISSOR_TEST);
+-    glScissor(0, 0, g_wide_w * s_scale, VRAM_H * s_scale);  /* full surface (rt_wide) */
++    /* Only X expands. A 256-high filter in a 240-high display must not touch
++     * the other vertical framebuffer band (the software target clips too). */
++    int sy = s_area_y1, sh = s_area_y2 - s_area_y1 + 1;
++    if (sy < 0) { sh += sy; sy = 0; }
++    if (sy + sh > VRAM_H) sh = VRAM_H - sy;
++    if (sh < 0) sh = 0;
++    glScissor(0, sy * s_scale, g_wide_w * s_scale, sh * s_scale);
+     if (semi >= 0) apply_psx_blend(semi); else glDisable(GL_BLEND);
+     mask_stencil(s_mask_set);
+     p_glUseProgram(s_geo_prog);
+@@ -2154,15 +2160,20 @@ static void gpu_flat_rect(int x,int y,int w,int h,uint16_t c,int semi) {
+         int lx = x - g_wide_cur_base, rx = x + w - g_wide_cur_base;
+         overlay = (native_w > 0 && lx <= 0 && rx >= native_w);
+     }
+-    if (overlay) s_wide_suppress = 1;
++    if (overlay) {
++        /* Retire earlier world geometry with its original mirror state. */
++        flush_flat_batch();
++        flush_tex_batch();
++        s_wide_suppress = 1;
++    }
+     gpu_triangle(x,   y,   c, x+w, y,   c, x,   y+h, c, semi);
+     gpu_triangle(x+w, y,   c, x,   y+h, c, x+w, y+h, c, semi);
+     if (overlay) {
++        /* gpu_triangle queues work. Land the canonical filter while mirror
++         * suppression is still active, then apply its wide pass exactly once. */
++        flush_flat_batch();
+         s_wide_suppress = 0;
+-        /* The two canonical triangles drew into the hr FBO already (each
+-         * gpu_triangle ran its own hr_begin/hr_end). Re-open the bracket just
+-         * for the full-width wide pass so blend/scissor/program state is
+-         * clean. */
++        /* Re-open the bracket for the full-width wide pass. */
+         if (s_ws_ablate != 1) {
+             hr_begin(0);
+             gl_perf_mirror_begin();
+@@ -2443,7 +2454,32 @@ static void glb_draw_shaded_line(int x0,int y0,uint16_t c0,int x1,int y1,uint16_
+     gpu_line(x0,y0,c0, x1,y1,c1, s_semi_en?s_semi_mode:-1);
+ }
+ static int  glb_render_display(uint32_t *o,int p,int dx,int dy,int dw,int dh){ ensure_cpu(); return sw_render_display(o,p,dx,dy,dw,dh); }
+-static int  glb_render_display_hires(uint32_t *o,int p,int dx,int dy,int dw,int dh){ ensure_cpu(); return sw_render_display_hires(o,p,dx,dy,dw,dh); }
++static int glb_render_display_hires(uint32_t *o, int p, int dx, int dy, int dw, int dh) {
++    if (!s_raster_ok || !s_ctx) {
++        ensure_cpu();
++        return sw_render_display_hires(o, p, dx, dy, dw, dh);
++    }
++    if (dx < 0 || dy < 0 || dw <= 0 || dh <= 0 ||
++        dx + dw > VRAM_W || dy + dh > VRAM_H) return 0;
++    int w = dw * s_scale, h = dh * s_scale;
++    if (p < w * (int)sizeof(uint32_t)) return 0;
++    uint32_t *pixels = (uint32_t *)malloc((size_t)w * h * sizeof(uint32_t));
++    if (!pixels) return 0;
++    flush_flat_batch();
++    flush_tex_batch();
++    flush_cpu_upload();
++    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_hr_fbo);
++    glPixelStorei(GL_PACK_ALIGNMENT, 4);
++    glReadPixels(dx * s_scale, dy * s_scale, w, h, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
++    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, 0);
++    /* FBO row zero is PSX row zero, just as in the wide-display readback. */
++    for (int y = 0; y < h; ++y) {
++        uint32_t *row = (uint32_t *)((uint8_t *)o + (size_t)y * p);
++        for (int x = 0; x < w; ++x) row[x] = pixels[(size_t)y * w + x] | 0xff000000u;
++    }
++    free(pixels);
++    return w * h;
++}
+ /* While GP1 depth24 is on, packed RGB888 lives in the CPU mirror and is
+  * presented via gl_renderer_present — never as 1555 FBO texels. Queuing those
+  * MDEC A0 rects hits UP_RECTS_MAX (16) and force-flushes mid-movie (MotK intro
+@@ -3378,6 +3414,7 @@ static GLuint wide_fbo_for(int base_x) {
+ static void glb_wide_configure(int wide_w, int offset) {
+     if (!s_raster_ok) return;
+     double t0 = cw_ms(); s_cw_wide_cfgs++;
++    flush_flat_batch();
+     flush_tex_batch();   /* a queued batch's wide mirror targets the CURRENT surfaces */
+     if (wide_w <= 0) { wide_free_all(); g_wide_w = 0; g_wide_off = 0; s_cw_wide_ms += cw_ms() - t0; return; }
+     if (wide_w != g_wide_w) wide_free_all();
+@@ -3390,6 +3427,7 @@ static void glb_wide_configure(int wide_w, int offset) {
+ static void glb_wide_set_target(int base_x) {
+     if (!s_raster_ok) { g_wide_cur = 0; return; }
+     double t0 = cw_ms(); s_cw_wide_sets++;
++    flush_flat_batch();
+     flush_tex_batch();   /* drain into the OLD target before switching */
+     g_wide_cur = wide_fbo_for(base_x);
+     g_wide_cur_base = base_x;
+@@ -3397,7 +3435,7 @@ static void glb_wide_set_target(int base_x) {
+ }
+ 
+ /* Stop mirroring (offscreen draws that don't target a framebuffer). */
+-static void glb_wide_disable_target(void) { flush_tex_batch(); g_wide_cur = 0; }
++static void glb_wide_disable_target(void) { flush_flat_batch(); flush_tex_batch(); g_wide_cur = 0; }
+ 
+ /* Mirror a framebuffer clear: fill the full wide width over [y, y+h) of the
+  * surface for base_x, so the revealed margins are clean. Mirrors sw_wide_clear:
+@@ -3476,6 +3514,45 @@ static void glb_wide_clear_margins(int base_x, int y, int h, uint16_t color, int
+     s_cw_wide_ms += cw_ms() - t0;
+ }
+ 
++static void glb_wide_flat_overlay(int y, int h, uint16_t color) {
++    if (!s_raster_ok || !g_wide_cur || s_ws_ablate == 1) return;
++    flush_flat_batch();
++    flush_tex_batch();
++    hr_begin(0);
++    gl_perf_mirror_begin();
++    wide_flat_rect_direct(0, y, g_wide_w, h, color, s_semi_en ? s_semi_mode : -1);
++    gl_perf_mirror_end();
++    hr_end();
++}
++
++static void glb_wide_extend_gradient(int base_x, int y, int h) {
++    if (!s_raster_ok || s_ws_ablate == 1 || g_wide_off <= 0) return;
++    flush_flat_batch();
++    flush_tex_batch();
++    GLuint fbo = wide_fbo_for(base_x);
++    if (!fbo) return;
++    int S = s_scale, W = g_wide_w * S, margin = g_wide_off * S;
++    int native_w = g_wide_w - 2 * g_wide_off;
++    int y0 = y * S, y1 = (y + h) * S;
++    if (y0 < 0) y0 = 0;
++    if (y1 > VRAM_H * S) y1 = VRAM_H * S;
++    if (y1 <= y0 || native_w <= 0 || base_x < 0 || base_x + native_w > VRAM_W) return;
++    gl_perf_mirror_begin();
++    /* The fast mirror may not have rendered its centre at all yet. Read the
++     * authoritative high-resolution FBO, not stale wide-centre pixels or the
++     * quantized CPU/15-bit VRAM copy. SSAA uses single-sample RGBA8 surfaces. */
++    p_glBindFramebuffer(PSXGL_READ_FRAMEBUFFER, s_hr_fbo);
++    p_glBindFramebuffer(PSXGL_DRAW_FRAMEBUFFER, fbo);
++    glDisable(GL_SCISSOR_TEST);
++    int left = base_x * S, right = (base_x + native_w) * S - 1;
++    p_glBlitFramebuffer(left, y0, left + 1, y1, 0, y0, margin, y1,
++                        GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
++    p_glBlitFramebuffer(right, y0, right + 1, y1, W - margin, y0, W, y1,
++                        GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
++    p_glBindFramebuffer(PSXGL_FRAMEBUFFER, 0);
++    gl_perf_mirror_end();
++}
++
+ /* Present source: read the wide FBO for the displayed buffer (base_x) into the
+  * CPU present buffer as ARGB8888, byte-identical to sw_render_wide_display's
+  * output so the shared CPU present path consumes it the same way. Output is
+@@ -4499,6 +4576,8 @@ static const GpuRenderBackend GL_BACKEND = {
+     .wide_disable_target = glb_wide_disable_target,
+     .wide_clear = glb_wide_clear,
+     .wide_clear_margins = glb_wide_clear_margins,
++    .wide_extend_gradient = glb_wide_extend_gradient,
++    .wide_flat_overlay = glb_wide_flat_overlay,
+     .render_wide_display = glb_render_wide_display,
+     .wide_dump_full = glb_wide_dump_full,
+ };
+diff --git a/runtime/src/gpu_render.c b/runtime/src/gpu_render.c
+index c833f491..6f912a1c 100644
+--- a/runtime/src/gpu_render.c
++++ b/runtime/src/gpu_render.c
+@@ -52,6 +52,8 @@ static const GpuRenderBackend SW_BACKEND = {
+     .wide_disable_target           = sw_wide_disable_target,
+     .wide_clear                    = sw_wide_clear,
+     .wide_clear_margins            = sw_wide_clear_margins,
++    .wide_extend_gradient          = sw_wide_extend_gradient,
++    .wide_flat_overlay             = sw_wide_flat_overlay,
+     .render_wide_display           = sw_render_wide_display,
+     .wide_dump_full                = sw_wide_dump_full,
+ };
+@@ -180,6 +182,19 @@ void gr_wide_clear_margins(int base_x, int y, int h, uint16_t color, int sides)
+     if (g_b->wide_clear_margins)
+         g_b->wide_clear_margins(base_x, y, h, color, sides);
+ }
++void gr_wide_extend_gradient(int base_x, int y, int h) {
++    if (g_b->wide_extend_gradient) {
++        g_b->wide_extend_gradient(base_x, y, h);
++    } else {
++        /* Backends without a high-resolution continuation retain the original
++         * native-row behavior instead of silently losing the background. */
++        for (int row = y; row < y + h; ++row)
++            gr_wide_clear_margins(base_x, row, 1, gr_vram_read(base_x, row), 3);
++    }
++}
++void gr_wide_flat_overlay(int y, int h, uint16_t color) {
++    g_b->wide_flat_overlay(y, h, color);
++}
+ int gr_render_wide_display(uint32_t *out, int pitch, int base_x,
+                            int disp_y, int disp_h) {
+     if (g_b->render_wide_display)
+diff --git a/runtime/src/gpu_sw_renderer.c b/runtime/src/gpu_sw_renderer.c
+index ff40acee..1378f657 100644
+--- a/runtime/src/gpu_sw_renderer.c
++++ b/runtime/src/gpu_sw_renderer.c
+@@ -30,6 +30,7 @@
+ #include "gpu_sw_renderer.h"
+ #include "gpu_vram_dirty.h"
+ #include "gpu_sw_edges.h"
++#include "gpu_sw_attributes.h"
+ #include <string.h>
+ #include <stdlib.h>
+ #include <math.h>
+@@ -898,6 +899,8 @@ static void raster_textured_triangle(const RTarget *t,
+                                      uint16_t texpage,
+                                      int perspective,
+                                      float q0, float q1, float q2) {
++    PSXAttribute up = psx_attribute(x0,y0,u0, x1,y1,u1, x2,y2,u2, t->s);
++    PSXAttribute vp = psx_attribute(x0,y0,v0, x1,y1,v1, x2,y2,v2, t->s);
+     /* Sort by Y, keeping UV in sync */
+     if (y0 > y1) {
+         int tt;
+@@ -977,8 +980,12 @@ static void raster_textured_triangle(const RTarget *t,
+ 
+         for (int x = sx; x < ex; x++) {
+             float t_val = (float)(x - xa) / (float)span;
+-            float fu = ua + (ub - ua) * t_val;
+-            float fv = va + (vb - va) * t_val;
++            float fu = (float)((double)psx_attribute_at(up, x, y) / 16777216.0);
++            float fv = (float)((double)psx_attribute_at(vp, x, y) / 16777216.0);
++            if (g_texture_filter) {
++                fu -= 0.5f / t->s;
++                fv -= 0.5f / t->s;
++            }
+             if (perspective) {
+                 float q = qa + (qb - qa) * t_val;
+                 if (q > 1.0e-12f) {
+@@ -993,8 +1000,9 @@ static void raster_textured_triangle(const RTarget *t,
+                                                       texpage, clut_x, clut_y);
+                 put_textured(t, x, y, texel, g_mod_r, g_mod_g, g_mod_b, g_raw_texture);
+             } else {
+-                uint16_t texel = texel_fetch((int)fu & 0xFF, (int)fv & 0xFF,
+-                                             texpage, clut_x, clut_y);
++                int iu = perspective ? ((int)fu & 0xFF) : (int)(psx_attribute_at(up, x, y) >> 24);
++                int iv = perspective ? ((int)fv & 0xFF) : (int)(psx_attribute_at(vp, x, y) >> 24);
++                uint16_t texel = texel_fetch(iu, iv, texpage, clut_x, clut_y);
+                 put_textured(t, x, y, texel, g_mod_r, g_mod_g, g_mod_b, g_raw_texture);
+             }
+         }
+@@ -1062,6 +1070,8 @@ static void raster_shaded_textured_triangle(const RTarget *t,
+                                             uint16_t texpage, int raw_texture,
+                                             int perspective,
+                                             float q0, float q1, float q2) {
++    PSXAttribute up = psx_attribute(x0,y0,u0, x1,y1,u1, x2,y2,u2, t->s);
++    PSXAttribute vp = psx_attribute(x0,y0,v0, x1,y1,v1, x2,y2,v2, t->s);
+     /* Sort by Y, keeping UV and color modulation in sync */
+     if (y0 > y1) {
+         int tt;
+@@ -1156,8 +1166,12 @@ static void raster_shaded_textured_triangle(const RTarget *t,
+ 
+         for (int x = sx; x < ex; x++) {
+             float t_val = (float)(x - xa) / (float)span;
+-            float fu = ua + (ub - ua) * t_val;
+-            float fv = va + (vb - va) * t_val;
++            float fu = (float)((double)psx_attribute_at(up, x, y) / 16777216.0);
++            float fv = (float)((double)psx_attribute_at(vp, x, y) / 16777216.0);
++            if (g_texture_filter) {
++                fu -= 0.5f / t->s;
++                fv -= 0.5f / t->s;
++            }
+             if (perspective) {
+                 float q = qa + (qb - qa) * t_val;
+                 if (q > 1.0e-12f) {
+@@ -1178,8 +1192,9 @@ static void raster_shaded_textured_triangle(const RTarget *t,
+                                                       texpage, clut_x, clut_y);
+                 put_textured(t, x, y, texel, mr, mg, mb, raw_texture);
+             } else {
+-                uint16_t texel = texel_fetch((int)fu & 0xFF, (int)fv & 0xFF,
+-                                             texpage, clut_x, clut_y);
++                int iu = perspective ? ((int)fu & 0xFF) : (int)(psx_attribute_at(up, x, y) >> 24);
++                int iv = perspective ? ((int)fv & 0xFF) : (int)(psx_attribute_at(vp, x, y) >> 24);
++                uint16_t texel = texel_fetch(iu, iv, texpage, clut_x, clut_y);
+                 put_textured(t, x, y, texel, mr, mg, mb, raw_texture);
+             }
+         }
+@@ -1821,6 +1836,31 @@ void sw_wide_clear_margins(int base_x, int y, int h, uint16_t color, int sides)
+     }
+ }
+ 
++void sw_wide_extend_gradient(int base_x, int y, int h) {
++    uint16_t *surf = wide_surf_for(base_x);
++    if (!surf) return;
++    int s = g_scale, W = g_wide_w * s, margin = g_wide_off * s;
++    int native_w = g_wide_w - 2 * g_wide_off;
++    if (margin <= 0 || native_w <= 0 || base_x < 0 || base_x + native_w > VRAM_WIDTH) return;
++    int y0 = max_i(y * s, 0), y1 = min_i((y + h) * s, VRAM_HEIGHT * s);
++    const uint16_t *source = g_hr ? g_hr : g_vram;
++    int pitch = g_hr ? g_hr_w : VRAM_WIDTH;
++    for (int row = y0; row < y1; ++row) {
++        const uint16_t *src = source + (size_t)row * pitch;
++        uint16_t left = src[base_x * s];
++        uint16_t right = src[(base_x + native_w) * s - 1];
++        uint16_t *dst = surf + (size_t)row * W;
++        for (int x = 0; x < margin; ++x) dst[x] = left;
++        for (int x = W - margin; x < W; ++x) dst[x] = right;
++    }
++}
++
++void sw_wide_flat_overlay(int y, int h, uint16_t color) {
++    if (!g_wide_cur) return;
++    RTarget target = rt_wide();
++    raster_flat_rect(&target, 0, y * g_scale, g_wide_w * g_scale, h * g_scale, color);
++}
++
+ /* Present source: convert the wide surface for the displayed buffer (base_x) to
+  * ARGB. Output is (g_wide_w*scale) wide × (disp_h*scale) tall. Returns 0 if no
+  * surface exists for base_x (caller falls back to the canonical present). */
+diff --git a/runtime/src/gpu_uv.h b/runtime/src/gpu_uv.h
+index 0c2d8568..0b16da02 100644
+--- a/runtime/src/gpu_uv.h
++++ b/runtime/src/gpu_uv.h
+@@ -1,7 +1,10 @@
+-/* gpu_uv.h — the ONE shared PS1 uv-sampling model for all render backends.
++/* gpu_uv.h — shared enhancement UV bounds and mirrored-mapping helpers.
+  *
+- * The PS1 DDA latches interpolants at each pixel's TOP-LEFT corner and
+- * truncates, so along any axis-aligned 2D mapping the prim's exclusive
++ * Native software polygon sampling is defined separately in
++ * gpu_sw_attributes.h: quantized plane gradients, a half-texel initial bias,
++ * and wrapping 8.24 accumulation. These helpers do not define that DDA.
++ *
++ * For unit-step axis-aligned 2D mappings, the prim's exclusive
+  * raster edge (+x right / +y bottom) never samples its end texel. Which uv
+  * extreme that is depends on the mapping direction: forward (uv increasing
+  * toward the exclusive edge) never samples max-uv; mirrored (uv decreasing
+@@ -24,7 +27,8 @@
+  *     never-sampled edge column/row as detached 1px slivers (MMX6 sprite
+  *     slivers; pink line under rolling wheels). Compensate by bumping the
+  *     prim's uv +1 along each decreasing axis. The software rasterizer's
+- *     own DDA truncates exactly like the PS1 and must NOT apply this.
++ *     native-scale fixed-point DDA already selects the PS1 texel and must
++ *     NOT apply this extra mirrored offset.
+  *
+  * Derivative direction is area2-normalized (winding-independent); diagonal
+  * (3D-ish) mappings — both derivatives nonzero on an axis — get no
+diff --git a/runtime/src/gpu_vk_renderer.c b/runtime/src/gpu_vk_renderer.c
+index 9df1aa5a..2f44b950 100644
+--- a/runtime/src/gpu_vk_renderer.c
++++ b/runtime/src/gpu_vk_renderer.c
+@@ -2805,12 +2805,10 @@ static void wide_overlay_rect(int y, int h, uint16_t c, int semi) {
+     push_vert(x0, fy0, col); push_vert(x1, fy1, col); push_vert(x0, fy1, col);
+     s_vbase += s_vcount; s_vcount = 0;    /* consume privately */
+     int blend = (semi < 0) ? 0 : (semi + 1);
+-    int S = s_scale;
+     VkCommandBuffer cb = begin_oneshot();
+     wide_pass_begin(cb);
+-    /* Overlay covers the whole surface: override the band scissor. */
+-    VkRect2D sc = { { 0, 0 }, { (uint32_t)(s_wide_w * S), (uint32_t)(VRAM_H * S) } };
+-    p_vkCmdSetScissor(cb, 0, 1, &sc);
++    /* Keep wide_pass_begin's Y-band scissor. Only the horizontal extent grows;
++     * oversized full-screen filters must not bleed into the other buffer. */
+     bind_masked(cb, 0, 0, blend, s_mask_check, s_mask_set);
+     GeoPush gp = { px_shift(), 0.0f, (float)s_wide_w / 2.0f };
+     p_vkCmdPushConstants(cb, s_pl_geo, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof gp, &gp);
+@@ -2821,6 +2819,13 @@ static void wide_overlay_rect(int y, int h, uint16_t c, int semi) {
+     end_oneshot(cb);
+ }
+ 
++static void vkb_wide_flat_overlay(int y, int h, uint16_t color) {
++    if (!s_ready || s_wide_cur < 0) return;
++    flush_tex_batch();
++    flush_geometry();
++    wide_overlay_rect(y, h, color, s_semi_en ? s_semi_mode : -1);
++}
++
+ static void vkb_draw_flat_rect(int x,int y,int w,int h,uint16_t c){
+     /* Full-screen 2D overlay under native-wide: the canonical rect must NOT
+      * mirror 1:1 (it would cover only the translated 4:3 span) — suppress the
+@@ -3308,6 +3313,7 @@ static const GpuRenderBackend VK_BACKEND = {
+     .wide_disable_target           = vkb_wide_disable_target,
+     .wide_clear                    = vkb_wide_clear,
+     .wide_clear_margins            = vkb_wide_clear_margins,
++    .wide_flat_overlay             = vkb_wide_flat_overlay,
+     .render_wide_display           = vkb_render_wide_display,
+ };
+ 
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index f1380ff6..ae68c688 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -10966,6 +10966,15 @@ int main(int argc, char** argv) {
+     psx_game_codegen_forward_if_built(argc, argv);
+ #endif
+ 
++    /* Optional host-device mappings, loaded by SDL before either the launcher
++     * or runtime initializes gamepads. Preserve an explicit player override. */
++    if (!SDL_GetHint(SDL_HINT_GAMECONTROLLERCONFIG_FILE)) {
++        const auto mappings = exe_dir_from_argv(argv[0]) / "gamecontrollerdb.txt";
++        std::error_code mapping_ec;
++        if (std::filesystem::is_regular_file(mappings, mapping_ec))
++            SDL_SetHint(SDL_HINT_GAMECONTROLLERCONFIG_FILE, mappings.string().c_str());
++    }
++
+     /* Install crash handlers early so they catch issues during init too.
+      * Writes psx_last_run_report.json on signal/SEH/atexit/fail-fast. */
+     psx_crash_trace_install_handlers();
+diff --git a/runtime/tests/test_dirty_text_continuation_guards.py b/runtime/tests/test_dirty_text_continuation_guards.py
+index 56aa21ea..108cf1a1 100644
+--- a/runtime/tests/test_dirty_text_continuation_guards.py
++++ b/runtime/tests/test_dirty_text_continuation_guards.py
+@@ -2,7 +2,69 @@
+ """Keep dirty-text continuation handoff behavior from regressing."""
+ 
+ from pathlib import Path
++import os
++import shutil
++import subprocess
+ import sys
++import tempfile
++
++
++def check_live_range_validation(range_guard: str) -> None:
++    """Exercise the actual runtime guard, including a patched backward edge."""
++    compiler = os.environ.get("CC") or shutil.which("gcc") or shutil.which("cc")
++    if not compiler:
++        raise AssertionError("C compiler required for continuation guard test")
++    declarations = r'''
++#include <assert.h>
++#include <stdint.h>
++#include <string.h>
++#define DIRTY_RAM_PAGE_SHIFT 12
++static uint8_t ram[8192], reference[8192];
++static uint8_t *text_ref_image = reference;
++static uint32_t text_ref_lo = 0, text_ref_hi = sizeof(reference);
++static uint32_t text_modified_bitmap[1];
++static uint32_t dirty_pages;
++static int dirty_ram_is_dirty(uint32_t address) {
++    return (dirty_pages >> (address >> DIRTY_RAM_PAGE_SHIFT)) & 1u;
++}
++static uint32_t g_text_native_blocked, g_text_exact_mismatches;
++static uint32_t g_text_exact_last_range_lo, g_text_exact_last_range_len;
++static uint32_t g_text_exact_last_mismatch, g_text_exact_last_live;
++static uint32_t g_text_exact_last_ref;
++'''
++    cases = r'''
++int main(void) {
++    const uint32_t ranges[] = {0x80000020u, 16u, 0x80000050u, 8u};
++    const uint32_t overflow[] = {8188u, 8u};
++    const uint32_t resume = 0x80000028u;
++    assert(dirty_ram_text_native_ok_ranges_from(ranges, 2, resume));
++    /* A continuation can loop backwards into bytes before its resume PC. */
++    text_modified_bitmap[0] = 1;
++    ram[0x20] = 1;
++    assert(!dirty_ram_text_native_ok_ranges_from(ranges, 2, resume));
++    assert(g_text_exact_last_mismatch == 0x20);
++    ram[0x20] = 0;
++    assert(dirty_ram_text_native_ok_ranges_from(ranges, 2, resume));
++    /* Runtime-written pages also require comparison, even without a guard bit. */
++    text_modified_bitmap[0] = 0;
++    dirty_pages = 1;
++    ram[0x54] = 1;
++    assert(!dirty_ram_text_native_ok_ranges_from(ranges, 2, resume));
++    ram[0x54] = 0;
++    ram[0x40] = 1; /* Mutable data in a gap is outside the emitted code. */
++    assert(dirty_ram_text_native_ok_ranges_from(ranges, 2, resume));
++    assert(!dirty_ram_text_native_ok_ranges_from(overflow, 1, resume));
++    assert(!dirty_ram_text_native_ok_ranges_from(ranges, 0, resume));
++    assert(!dirty_ram_text_native_ok_ranges_from(0, 2, resume));
++    return 0;
++}
++'''
++    with tempfile.TemporaryDirectory() as directory:
++        source = Path(directory) / "range_guard.c"
++        binary = Path(directory) / ("range_guard.exe" if os.name == "nt" else "range_guard")
++        source.write_text(declarations + range_guard + cases, encoding="utf-8")
++        subprocess.run([compiler, "-std=c11", str(source), "-o", str(binary)], check=True)
++        subprocess.run([str(binary)], check=True)
+ 
+ 
+ def main() -> int:
+@@ -16,15 +78,7 @@ def main() -> int:
+     end = memory.index("\n/* Preserve the generated-code ABI", start)
+     range_guard = memory[start:end]
+ 
+-    required_range_fragments = (
+-        "uint32_t exec_pc",
+-        "if (phys + len <= at) continue;",
+-        "len -= at - phys;",
+-        "if (!any)",
+-    )
+-    for fragment in required_range_fragments:
+-        if fragment not in range_guard:
+-            raise AssertionError(f"missing continuation range guard: {fragment}")
++    check_live_range_validation(range_guard)
+     if "text_diverged_bitmap" in range_guard:
+         raise AssertionError("exact-range mismatch still sticky-poisons a whole page")
+     if "dirty_ram_text_native_ok_ranges_from(lo_len_pairs, count, 0u)" not in memory:
+@@ -32,7 +86,7 @@ def main() -> int:
+ 
+     handoff = "clean_game_text_miss && interp_enter_compiled(cpu, "
+     if interp.count(handoff) != 1:
+-        raise AssertionError("expected one suffix-validated transfer handoff")
++        raise AssertionError("expected one validated transfer handoff")
+     if "interp_enter_compiled(cpu, target)" not in interp:
+         raise AssertionError("missing transfer-boundary continuation handoff")
+     if "psx_game_text_native_ok_full(pc) &&" not in interp:
+diff --git a/runtime/tests/test_launcher_vulkan_option.py b/runtime/tests/test_launcher_vulkan_option.py
+index ad460ece..06d51d37 100644
+--- a/runtime/tests/test_launcher_vulkan_option.py
++++ b/runtime/tests/test_launcher_vulkan_option.py
+@@ -2,10 +2,10 @@
+ from pathlib import Path
+ 
+ root = Path(__file__).resolve().parents[2]
+-main = (root / "runtime" / "src" / "main.cpp").read_text()
+-config_h = (root / "recompiler" / "src" / "config_loader.h").read_text()
+-config_cpp = (root / "recompiler" / "src" / "config_loader.cpp").read_text()
+-runtime_cmake = (root / "runtime" / "runtime.cmake").read_text()
++main = (root / "runtime" / "src" / "main.cpp").read_text(encoding="utf-8")
++config_h = (root / "recompiler" / "src" / "config_loader.h").read_text(encoding="utf-8")
++config_cpp = (root / "recompiler" / "src" / "config_loader.cpp").read_text(encoding="utf-8")
++runtime_cmake = (root / "runtime" / "runtime.cmake").read_text(encoding="utf-8")
+ 
+ assert "runtime/" + "launcher" not in runtime_cmake
+ assert "Rml" + "Ui" not in runtime_cmake
+diff --git a/runtime/tests/test_release_zip.py b/runtime/tests/test_release_zip.py
+index 2431963a..73131af2 100644
+--- a/runtime/tests/test_release_zip.py
++++ b/runtime/tests/test_release_zip.py
+@@ -16,8 +16,8 @@ with tempfile.TemporaryDirectory() as temporary:
+     stage = base / "stage"
+     (stage / "mods" / "package").mkdir(parents=True)
+     (stage / "Tomba Recompiled.exe").write_bytes(b"exe")
+-    (stage / "mods" / "package" / "manifest.toml").write_text(
+-        'id = "test"\n', encoding="utf-8"
++    (stage / "mods" / "package" / "manifest.toml").write_bytes(
++        b'id = "test"\n'
+     )
+     output = base / "release.zip"
+     subprocess.run(
+diff --git a/tools/compile_overlays.py b/tools/compile_overlays.py
+index c36f0169..9f8a1f2e 100644
+--- a/tools/compile_overlays.py
++++ b/tools/compile_overlays.py
+@@ -459,9 +459,9 @@ NON_AUTHORITY_MANIFEST_PROVENANCES = {
+ HOSTED_MANIFEST_MARKER = (
+     f'# psxrecomp overlay provenance {HOSTED_MANIFEST_PROVENANCE}')
+ HOSTED_UNIQUE_GUARDED_BYTE_CAP = 1024 * 1024
+-# Full 8 MiB host capacity (PSX_RAM_CAPACITY): 8 MB-mod captures carry
+-# high-bank enhancement code and their ranges must validate.
+-PSX_RAM_SIZE = 8 * 1024 * 1024
++# Match overlay_loader.c's OVERLAY_RAM_SIZE. Discovery must not count a
++# high-bank shard as coverage when the runtime cannot admit its manifest.
++PSX_RAM_SIZE = 2 * 1024 * 1024
+ 
+ 
+ class ShardCandidateCapacityError(RuntimeError):
+diff --git a/tools/package_setup_host.sh b/tools/package_setup_host.sh
+index 977802e3..913d2711 100755
+--- a/tools/package_setup_host.sh
++++ b/tools/package_setup_host.sh
+@@ -212,6 +212,11 @@ for cand in \
+   "${BUILD_DIR}/${EXE_NAME}.exe" \
+   "${BUILD_DIR}/Release/${EXE_NAME}.exe"
+ do
++  # MSYS2's file test also resolves foo to foo.exe. Keep the real suffix so
++  # Windows DLL staging and emitter selection recognize this as a PE host.
++  if [[ "${cand}" != *.exe && -f "${cand}.exe" ]]; then
++    cand="${cand}.exe"
++  fi
+   if [[ -f "${cand}" ]]; then
+     EXE="${cand}"
+     break
+diff --git a/docs/beetle-oracle.md b/docs/beetle-oracle.md
+new file mode 100644
+--- /dev/null
++++ b/docs/beetle-oracle.md
+@@ -0,0 +1,89 @@
++# Restoring the independent Beetle oracle
++
++The compatible upstream base is
++`5759277be50052b9f3f388578bf56cc7899d833f` from
++<https://github.com/libretro/beetle-psx-libretro>.
++`beetle_oracle_hooks.patch` is a consolidated patch against that exact base;
++it replaces the three older partial patches. Do not apply both sets.
++The patch modifies the GPL-2.0-or-later Beetle core and retains its license.
++The checkout and compiled libraries stay in gitignored `beetle-psx/`.
++
++On Windows, with MSYS2 MinGW64 GCC, make, CMake, Ninja, SDL2 and zlib installed:
++
++```powershell
++./tools/build_beetle_oracle.ps1
++```
++
++This builds `runtime/build-oracle/psx-beetle.exe` with RelWithDebInfo and TCP
++debugging. The script preserves an existing checkout and fails on a pin or
++patch conflict. SDL2 is explicitly selected for this oracle harness. The
++game project can independently select SDL3. No generated BIOS or game code
++is needed to build this independent executable. `ALLOW_NO_BIOS` is used
++only to configure the shared CMake project; the native runtime is not built
++or verified by this command.
++
++For local launch, put `C:/msys64/mingw64/bin` on PATH for its DLLs. Use a
++gitignored build directory as the working directory so oracle memory cards
++and captures stay local:
++
++```powershell
++$env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
++# Run from runtime/build-oracle/verification (create it first).
++../psx-beetle.exe ../../../bios/openbios.bin --disc C:/dumps/game.cue --port 4380 --wtrace-boot
++```
++
++The harness selects upstream's `openbios` firmware option when the provided
++filename is `openbios.bin` (also the upstream uppercase spellings). Always
++verify the actual ROM through `read_ram`; accepting a BIOS path alone is not
++proof of which firmware libretro loaded.
++
++The consolidated hooks expose CPU data reads/writes, J/JAL/JR/JALR calls,
++completed SIO bytes, CD command dispatch, IRQ rising edges, SPU key/block
++events, the live CPU cycle clock, and exception entries. They observe existing
++core operations without altering instructions, device state, or timing.
++Cycle-watch uses instruction-entry timestamps, including cold instruction
++fetch costs in an A-to-B delta. Device-event cycles stamp the CPU service
++time; they do not claim a separate peripheral edge timestamp.
++
++`beetle_observe.cpp` implements bounded cycle-watch and exception rings;
++these commands previously returned placeholders. The core and frontend both
++define `__LIBRETRO__` to keep the C++ CDC layout identical. Call tracing
++uses the current instruction PC rather than the frame-end backing PC.
++
++For a running program, choose two observed PCs on a recurring path and run:
++
++```powershell
++python tools/verify_beetle_oracle.py --bios bios/openbios.bin `
++  --anchor 0x00001C04 --end 0x00001C08 `
++  --out runtime/build-oracle/verification/oracle-proof.json
++```
++
++Those example PCs are in the pinned OpenBIOS timer callback; they were
++observed while Final Fantasy Tactics (USA) was running. This smoke test
++requires active disc, pad, SPU, and interrupt traffic. A program that does not
++exercise those paths will fail the relevant checks. Inspect the emitted PNG
++as the separate visual gate. The JSON, PNG and WAV remain local build output.
++
++## Software raster comparisons
++
++`psx-beetle --headless` retains the core, TCP server and frame pacing while
++omitting the oracle window and audio device. This permits a single visible game
++window during native/oracle comparisons.
++
++The TCP `gpu_probe` command accepts a `words` string of concatenated eight-digit
++hex GP0 words. It saves the core, creates a procedural 15-bit texture, submits
++the packet, returns a 128 × 128 raw pixel rectangle, and restores the core. A
++failed restoration aborts instead of continuing with modified game state. This
++is an intentional diagnostic GPU operation, separate from passive event rings.
++
++Build the `gpu_sw_probe` runtime CMake target and run:
++
++```powershell
++python tools/verify_gpu_raster.py runtime/build-oracle/libgpu_sw_probe.dll `
++  --port 4380 --output runtime/build-oracle/verification/raster.json
++ctest --test-dir runtime/build-oracle -R gpu_sw_beetle_raster_test --output-on-failure
++```
++
++The live comparison checks 116 procedural raw-texture triangle cases. CTest
++checks the same native renderer against recorded Beetle hashes without requiring
++a live game or disc. The fixture includes no copyrighted game pixels or code.
+diff --git a/docs/beetle_oracle_hooks.patch b/docs/beetle_oracle_hooks.patch
+new file mode 100644
+--- /dev/null
++++ b/docs/beetle_oracle_hooks.patch
+@@ -0,0 +1,405 @@
++diff --git a/libretro.cpp b/libretro.cpp
++index d2e82bca..daf63c97 100644
++--- a/libretro.cpp
+++++ b/libretro.cpp
++@@ -508,6 +508,28 @@ PS_SPU *PSX_SPU = NULL;
++ PS_CDC *PSX_CDC = NULL;
++ FrontIO *PSX_FIO = NULL;
++ 
+++/* PSXRecomp oracle hooks: NULL when no listener attached. */
+++psxrecomp_wtrace_cb_t  g_psxrecomp_wtrace_cb  = NULL;
+++psxrecomp_fntrace_cb_t g_psxrecomp_fntrace_cb = NULL;
+++psxrecomp_cdcmd_cb_t   g_psxrecomp_cdcmd_cb   = NULL;
+++psxrecomp_wtrace_cb_t g_psxrecomp_rtrace_cb = NULL;
+++void (*g_psxrecomp_irq_cb)(int) = NULL;
+++void (*g_psxrecomp_insn_cb)(uint32_t, uint64_t) = NULL;
+++void (*g_psxrecomp_exc_cb)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) = NULL;
+++void (*g_psxrecomp_spu_cb)(unsigned, unsigned, unsigned, unsigned) = NULL;
+++const int32_t *g_psxrecomp_timestamp = NULL;
+++uint32_t g_psxrecomp_pc = 0;
+++static uint64_t psxrecomp_completed_cycles = 0;
+++extern "C" unsigned long long beetle_core_get_guest_cycles(void)
+++{
+++   return psxrecomp_completed_cycles +
+++      (g_psxrecomp_timestamp ? (uint32_t)*g_psxrecomp_timestamp : 0u);
+++}
+++extern "C" unsigned psxrecomp_cdc_irq_type(void)
+++{
+++   return PSX_CDC ? PSX_CDC->PSXRecomp_GetIRQType() : 0u;
+++}
+++
++ MultiAccessSizeMem<512 * 1024, uint32, false> *BIOSROM = NULL;
++ MultiAccessSizeMem<65536, uint32, false> *PIOMem = NULL;
++ MultiAccessSizeMem<2048 * 1024, uint32, false> *MainRAM = NULL;
++@@ -1262,6 +1284,9 @@ uint32_t PSX_MemPeek32(uint32_t A)
++ // FIXME: Add PSX_Reset() and FrontIO::Reset() so that emulated input devices don't get power-reset on reset-button reset.
++ static void PSX_Power(void)
++ {
+++   psxrecomp_completed_cycles = 0;
+++   g_psxrecomp_timestamp = NULL;
+++   g_psxrecomp_pc = 0;
++    unsigned i;
++ 
++    PSX_PRNG.x = 123456789;
++@@ -4818,7 +4843,10 @@ void retro_run(void)
++ 
++    assert(timestamp);
++ 
+++   g_psxrecomp_timestamp = &timestamp;
++    ForceEventUpdates(timestamp);
+++   psxrecomp_completed_cycles += (uint32_t)timestamp;
+++   g_psxrecomp_timestamp = NULL;
++ 
++    espec->SoundBufSize = IntermediateBufferPos;
++    IntermediateBufferPos = 0;
++diff --git a/mednafen/psx/cdc.cpp b/mednafen/psx/cdc.cpp
++index 1daaa5b7..d8e28cfb 100644
++--- a/mednafen/psx/cdc.cpp
+++++ b/mednafen/psx/cdc.cpp
++@@ -1318,6 +1318,16 @@ int32_t PS_CDC::Update(const int32_t timestamp)
++                      else
++                      {
++                         const CDC_CTEntry *command = &Commands[PendingCommand];
+++                        /* PSXRecomp oracle hook: CD command about to execute.
+++                         * PC of the guest at dispatch time — the command was
+++                         * WRITTEN earlier (latency), so this is the poll/idle
+++                         * PC, but it still localizes kernel vs shell vs game. */
+++                        if(MDFN_UNLIKELY(g_psxrecomp_cdcmd_cb))
+++                           g_psxrecomp_cdcmd_cb(PendingCommand, ArgsReceiveIn,
+++                                                ArgsReceiveIn > 0 ? ArgsReceiveBuf[0] : 0,
+++                                                ArgsReceiveIn > 1 ? ArgsReceiveBuf[1] : 0,
+++                                                ArgsReceiveIn > 2 ? ArgsReceiveBuf[2] : 0,
+++                                                g_psxrecomp_pc);
++                         next_time = (this->*(command->func))(ArgsReceiveIn, ArgsReceiveBuf);
++                         PendingCommandPhase = 2;
++                      }
++diff --git a/mednafen/psx/cdc.h b/mednafen/psx/cdc.h
++index fabf2053..7819a0e4 100644
++--- a/mednafen/psx/cdc.h
+++++ b/mednafen/psx/cdc.h
++@@ -38,6 +38,11 @@ class PS_CDC
++       void SoftReset(void);
++ 
++       void GetCDAudio(int32 samples[2], const unsigned freq);
+++      void PSXRecomp_GetDecodeVolume(uint8 out[2][2]) const {
+++         for(unsigned i = 0; i < 2; ++i)
+++            for(unsigned j = 0; j < 2; ++j) out[i][j] = DecodeVolume[i][j];
+++      }
+++      unsigned PSXRecomp_GetIRQType() const { return IRQBuffer & 0x0F; }
++ 
++       CD_Audio_Buffer AudioBuffer;
++ #ifdef __LIBRETRO__
++diff --git a/mednafen/psx/cpu.cpp b/mednafen/psx/cpu.cpp
++index f11e243b..870ec1ea 100644
++--- a/mednafen/psx/cpu.cpp
+++++ b/mednafen/psx/cpu.cpp
++@@ -416,9 +416,12 @@ INLINE T PS_CPU::ReadMemory(pscpu_timestamp_t &timestamp, uint32 address, bool D
++   LDAbsorb = 0;
++ 
++   if(DS24)
++-   return ScratchRAM->ReadU24(address & 0x3FF);
+++   ret = ScratchRAM->ReadU24(address & 0x3FF);
++   else
++-   return ScratchRAM->Read<T>(address & 0x3FF);
+++   ret = ScratchRAM->Read<T>(address & 0x3FF);
+++  if(MDFN_UNLIKELY(g_psxrecomp_rtrace_cb))
+++   g_psxrecomp_rtrace_cb(address, ret, g_psxrecomp_pc, GPR[31], DS24 ? 3 : sizeof(T));
+++  return ret;
++  }
++ 
++  timestamp += (ReadFudge >> 4) & 2;
++@@ -446,6 +449,8 @@ INLINE T PS_CPU::ReadMemory(pscpu_timestamp_t &timestamp, uint32 address, bool D
++ 
++  LDAbsorb = (lts - timestamp);
++  timestamp = lts;
+++ if(MDFN_UNLIKELY(g_psxrecomp_rtrace_cb))
+++  g_psxrecomp_rtrace_cb(address, ret, g_psxrecomp_pc, GPR[31], DS24 ? 3 : sizeof(T));
++ 
++  return(ret);
++ }
++@@ -634,6 +639,8 @@ uint32 NO_INLINE PS_CPU::Exception(uint32 code, uint32 PC, const uint32 NP, cons
++  //
++  RecalcIPCache();
++ 
+++ if(MDFN_UNLIKELY(g_psxrecomp_exc_cb))
+++    g_psxrecomp_exc_cb(code, PC, CP0.EPC, CP0.SR, CP0.CAUSE);
++  BDBT = 0;
++ 
++  return(handler);
++@@ -662,6 +669,7 @@ template<bool DebugMode, bool BIOSPrintMode, bool ILHMode>
++ pscpu_timestamp_t PS_CPU::RunReal(pscpu_timestamp_t timestamp_in)
++ {
++  pscpu_timestamp_t timestamp = timestamp_in;
+++ g_psxrecomp_timestamp = &timestamp;
++ 
++  uint32 PC;
++  uint32 new_PC;
++@@ -689,6 +697,9 @@ pscpu_timestamp_t PS_CPU::RunReal(pscpu_timestamp_t timestamp_in)
++ 
++    // Zero must be zero...until the Master Plan is enacted.
++    GPR[0] = 0;
+++   g_psxrecomp_pc = PC;
+++   if(MDFN_UNLIKELY(g_psxrecomp_insn_cb))
+++      g_psxrecomp_insn_cb(PC, beetle_core_get_guest_cycles());
++ 
++ #ifdef DEBUG
++    if(DebugMode && CPUHook)
++@@ -1557,6 +1568,12 @@ pscpu_timestamp_t PS_CPU::RunReal(pscpu_timestamp_t timestamp_in)
++ 
++ 	DO_LDS();
++ 
+++	/* PSXRecomp oracle hook: J retire (caller_pc, target). */
+++	if (MDFN_UNLIKELY(g_psxrecomp_fntrace_cb)) {
+++	    uint32_t target_addr = (PC & 0xF0000000u) | ((target << 2) & 0x0FFFFFFFu);
+++	    g_psxrecomp_fntrace_cb(PC, target_addr, GPR[31], GPR[4], GPR[5], 1 /* J */);
+++	}
+++
++ 	DO_BRANCH(true, target << 2, 0xF0000000, false, 0);
++     END_OPF;
++ 
++@@ -1572,6 +1589,12 @@ pscpu_timestamp_t PS_CPU::RunReal(pscpu_timestamp_t timestamp_in)
++ 
++ 	DO_LDS();
++ 
+++	/* PSXRecomp oracle hook: JAL retire. parent_ra captured BEFORE link. */
+++	if (MDFN_UNLIKELY(g_psxrecomp_fntrace_cb)) {
+++	    uint32_t target_addr = (PC & 0xF0000000u) | ((target << 2) & 0x0FFFFFFFu);
+++	    g_psxrecomp_fntrace_cb(PC, target_addr, GPR[31], GPR[4], GPR[5], 2 /* JAL */);
+++	}
+++
++ 	DO_BRANCH(true, target << 2, 0xF0000000, true, 31);
++     END_OPF;
++ 
++@@ -1590,6 +1613,10 @@ pscpu_timestamp_t PS_CPU::RunReal(pscpu_timestamp_t timestamp_in)
++ 
++ 	DO_LDS();
++ 
+++	/* PSXRecomp oracle hook: JALR retire. parent_ra captured BEFORE link. */
+++	if (MDFN_UNLIKELY(g_psxrecomp_fntrace_cb))
+++	    g_psxrecomp_fntrace_cb(PC, tmp, GPR[31], GPR[4], GPR[5], 4 /* JALR */);
+++
++ 	DO_BRANCH(true, tmp, 0, true, rd);
++     END_OPF;
++ 
++@@ -1608,6 +1635,10 @@ pscpu_timestamp_t PS_CPU::RunReal(pscpu_timestamp_t timestamp_in)
++ 
++ 	DO_LDS();
++ 
+++	/* PSXRecomp oracle hook: JR retire. */
+++	if (MDFN_UNLIKELY(g_psxrecomp_fntrace_cb))
+++	    g_psxrecomp_fntrace_cb(PC, bt, GPR[31], GPR[4], GPR[5], 3 /* JR */);
+++
++ 	DO_BRANCH(true, bt, 0, false, 0);
++     END_OPF;
++ 
++@@ -2370,13 +2401,17 @@ pscpu_timestamp_t PS_CPU::RunReal(pscpu_timestamp_t timestamp_in)
++ 
++ 	WriteMemory<uint8>(timestamp, address, GPR[rt]);
++ 
+++	/* PSXRecomp oracle hook: capture (addr, val, PC, ra, size) for wtrace. */
+++	if (MDFN_UNLIKELY(g_psxrecomp_wtrace_cb))
+++	    g_psxrecomp_wtrace_cb(address, GPR[rt] & 0xFFu, PC, GPR[31], 1);
+++
++ 	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
++ 		PGXP_CPU_SB(instr, GPR[rt], address);
++ 
++ 	DO_LDS();
++     END_OPF;
++ 
++-    // 
+++    //
++     // SH - Store Halfword
++     //
++     BEGIN_OPF(SH);
++@@ -2397,13 +2432,17 @@ pscpu_timestamp_t PS_CPU::RunReal(pscpu_timestamp_t timestamp_in)
++ 	else
++ 	 WriteMemory<uint16>(timestamp, address, GPR[rt]);
++ 
+++	/* PSXRecomp oracle hook: SH (only if no alignment exception). */
+++	if (MDFN_UNLIKELY(g_psxrecomp_wtrace_cb) && !(address & 0x1))
+++	    g_psxrecomp_wtrace_cb(address, GPR[rt] & 0xFFFFu, PC, GPR[31], 2);
+++
++ 	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
++ 		PGXP_CPU_SH(instr, GPR[rt], address);
++ 
++ 	DO_LDS();
++     END_OPF;
++ 
++-    // 
+++    //
++     // SW - Store Word
++     //
++     BEGIN_OPF(SW);
++@@ -2424,6 +2463,10 @@ pscpu_timestamp_t PS_CPU::RunReal(pscpu_timestamp_t timestamp_in)
++ 	else
++ 	 WriteMemory<uint32>(timestamp, address, GPR[rt]);
++ 
+++	/* PSXRecomp oracle hook: SW (only if no alignment exception). */
+++	if (MDFN_UNLIKELY(g_psxrecomp_wtrace_cb) && !(address & 0x3))
+++	    g_psxrecomp_wtrace_cb(address, GPR[rt], PC, GPR[31], 4);
+++
++ 	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
++ 		PGXP_CPU_SW(instr, GPR[rt], address);
++ 
++@@ -2631,6 +2674,7 @@ pscpu_timestamp_t PS_CPU::RunReal(pscpu_timestamp_t timestamp_in)
++   muldiv_ts_done -= timestamp;
++ 
++  ACTIVE_TO_BACKING;
+++ g_psxrecomp_timestamp = NULL;
++ 
++  return(timestamp);
++ }
++diff --git a/mednafen/psx/dma.cpp b/mednafen/psx/dma.cpp
++index 27da2cd2..caec8543 100644
++--- a/mednafen/psx/dma.cpp
+++++ b/mednafen/psx/dma.cpp
++@@ -54,6 +54,7 @@ static int32_t DMACycleCounter;
++ static uint32_t DMAControl;         /* DMA control register */
++ static uint32_t DMAIntControl;
++ static uint8_t DMAIntStatus;
+++extern "C" unsigned psxrecomp_dma_int_status(void) { return DMAIntStatus; }
++ static bool IRQOut;                 /* IRQ enable for individual channels */
++ 
++ struct Channel
++diff --git a/mednafen/psx/frontio.cpp b/mednafen/psx/frontio.cpp
++index a35b022f..02e7ce0b 100644
++--- a/mednafen/psx/frontio.cpp
+++++ b/mednafen/psx/frontio.cpp
++@@ -783,6 +783,10 @@ int32_t FrontIO::Update(int32_t timestamp)
++                   ReceiveInProgress = false;
++                   ReceiveBufferAvail = true;
++ 
+++                  /* PSXRecomp oracle hook: byte exchange complete. */
+++                  if(MDFN_UNLIKELY(sio_trace_cb))
+++                     sio_trace_cb(TransmitBuffer, ReceiveBuffer, (uint16_t)Control);
+++
++                   if(Control & 0x800)
++                   {
++                      istatus = true;
++diff --git a/mednafen/psx/frontio.h b/mednafen/psx/frontio.h
++index 8a67f5af..d9a260ca 100644
++--- a/mednafen/psx/frontio.h
+++++ b/mednafen/psx/frontio.h
++@@ -95,8 +95,15 @@ class FrontIO
++ 
++       int StateAction(StateMem* sm, int load, int data_only);
++ 
+++      /* PSXRecomp oracle hook: fires once per completed SIO byte exchange
+++       * (tx byte sent, rx byte received, current Control register). */
+++      typedef void (*sio_trace_cb_t)(uint8_t tx, uint8_t rx, uint16_t ctrl);
+++      void SetSIOTraceCallback(sio_trace_cb_t cb) { sio_trace_cb = cb; }
+++
++    private:
++ 
+++      sio_trace_cb_t sio_trace_cb = nullptr;
+++
++       void DoDSRIRQ(void);
++       void CheckStartStopPending(int32_t timestamp, bool skip_event_set = false);
++ 
++diff --git a/mednafen/psx/irq.cpp b/mednafen/psx/irq.cpp
++index 029b9f84..4f0b25af 100644
++--- a/mednafen/psx/irq.cpp
+++++ b/mednafen/psx/irq.cpp
++@@ -76,6 +76,8 @@ void IRQ_Assert(int which, bool status)
++    }
++ 
++    Recalc();
+++   if(((old_Asserted ^ Asserted) & Asserted & (1u << which)) && g_psxrecomp_irq_cb)
+++      g_psxrecomp_irq_cb(which);
++ }
++ 
++ 
++diff --git a/mednafen/psx/psx.h b/mednafen/psx/psx.h
++index 704c0a19..e036ee86 100644
++--- a/mednafen/psx/psx.h
+++++ b/mednafen/psx/psx.h
++@@ -137,4 +137,57 @@ extern unsigned psx_gpu_overclock_shift;
++ extern uint8_t analog_combo[2];
++ extern uint8_t analog_combo_hold;
++ 
+++/* PSXRecomp oracle: SIO byte trace callback.
+++ * Fired by FrontIO when a complete byte exchange finishes. */
+++class FrontIO;
+++extern FrontIO *PSX_FIO;
+++typedef void (*psxrecomp_sio_trace_cb_t)(uint8_t tx, uint8_t rx, uint16_t ctrl);
+++
+++/* PSXRecomp oracle: RAM write trace callback.
+++ * Fired by PS_CPU::SB/SH/SW after the write completes.
+++ *   addr  = virtual address (caller masks for physical filter)
+++ *   value = stored value (sized by `size`)
+++ *   pc    = PC of the executing store instruction
+++ *   ra    = $ra (GPR[31]) at time of store, for one frame of caller context
+++ *   size  = 1, 2, or 4 (byte / halfword / word) */
+++typedef void (*psxrecomp_wtrace_cb_t)(uint32_t addr, uint32_t value,
+++                                       uint32_t pc, uint32_t ra, uint8_t size);
+++extern psxrecomp_wtrace_cb_t g_psxrecomp_wtrace_cb;
+++
+++/* PSXRecomp oracle: function-call (JAL/JALR/J/JR) trace callback.
+++ * Fired by PS_CPU on every J/JAL/JR/JALR retire, BEFORE the link write.
+++ * Caller filters by target_pc to keep volume bounded.
+++ *   caller_pc = PC of the J/JAL/JR/JALR instruction
+++ *   target_pc = computed branch target
+++ *   parent_ra = GPR[31] at time of call (parent's return address)
+++ *   a0, a1    = argument registers at time of call
+++ *   kind      = 1=J, 2=JAL, 3=JR, 4=JALR */
+++typedef void (*psxrecomp_fntrace_cb_t)(uint32_t caller_pc, uint32_t target_pc,
+++                                        uint32_t parent_ra, uint32_t a0,
+++                                        uint32_t a1, uint8_t kind);
+++extern psxrecomp_fntrace_cb_t g_psxrecomp_fntrace_cb;
+++
+++/* PSXRecomp oracle: CD command trace callback.
+++ * Fired by PS_CDC just before a command handler executes.
+++ *   cmd   = command byte (0x01 GetStat, 0x02 Setloc, 0x06 ReadN, 0x09 Pause,
+++ *           0x0A Init, 0x0E Setmode, 0x15 SeekL, 0x1A GetID, 0x1B ReadS, ...)
+++ *   nargs = number of argument bytes
+++ *   arg0..arg2 = first three argument bytes (0 if absent) */
+++typedef void (*psxrecomp_cdcmd_cb_t)(uint8_t cmd, uint8_t nargs,
+++                                      uint8_t arg0, uint8_t arg1, uint8_t arg2,
+++                                      uint32_t pc);
+++extern psxrecomp_cdcmd_cb_t g_psxrecomp_cdcmd_cb;
+++
+++/* Observation only: callbacks never change guest state or charge cycles. */
+++extern psxrecomp_wtrace_cb_t g_psxrecomp_rtrace_cb;
+++extern void (*g_psxrecomp_irq_cb)(int which);
+++extern void (*g_psxrecomp_insn_cb)(uint32_t pc, uint64_t cycles);
+++extern void (*g_psxrecomp_exc_cb)(uint32_t code, uint32_t pc, uint32_t epc,
+++                                 uint32_t sr, uint32_t cause);
+++extern void (*g_psxrecomp_spu_cb)(unsigned kind, unsigned voice,
+++                                unsigned addr, unsigned env);
+++extern const int32_t *g_psxrecomp_timestamp;
+++extern uint32_t g_psxrecomp_pc;
+++extern "C" unsigned long long beetle_core_get_guest_cycles(void);
+++
++ #endif
++diff --git a/mednafen/psx/spu.cpp b/mednafen/psx/spu.cpp
++index 513628ae..5b5bb938 100644
++--- a/mednafen/psx/spu.cpp
+++++ b/mednafen/psx/spu.cpp
++@@ -327,6 +327,9 @@ void PS_SPU::RunDecoder(SPU_Voice *voice)
++          voice->CurAddr = voice->LoopAddr & ~0x7;
++ 
++          BlockEnd |= 1 << (voice - Voices);
+++         if(g_psxrecomp_spu_cb)
+++            g_psxrecomp_spu_cb((voice->DecodeFlags & 2) ? 4 : 3,
+++               voice - Voices, voice->CurAddr, voice->ADSR.EnvLevel);
++ 
++          if(!(voice->DecodeFlags & 0x2))	// Force enveloping to 0 if not "looping".  TODO: Should we reset the ADSR divider counter too?
++          {
++@@ -925,6 +928,8 @@ int32 PS_SPU::UpdateFromCDC(int32 clocks)
++                if(voice->DecodePlayDelay < 3)
++                {
++                   ReleaseEnvelope(voice);
+++                  if(g_psxrecomp_spu_cb)
+++                     g_psxrecomp_spu_cb(2, voice_num, voice->CurAddr, voice->ADSR.EnvLevel);
++                }
++             }
++          }
++@@ -950,6 +955,8 @@ int32 PS_SPU::UpdateFromCDC(int32 clocks)
++             voice->CurPhase = 0;
++             voice->CurAddr = voice->StartAddr & ~0x7;
++             voice->IgnoreSampLA = false;
+++            if(g_psxrecomp_spu_cb)
+++               g_psxrecomp_spu_cb(1, voice_num, voice->CurAddr, voice->ADSR.EnvLevel);
++          }
++ 
++          if(!(SPUControl & 0x8000))
+diff --git a/runtime/src/beetle_observe.cpp b/runtime/src/beetle_observe.cpp
+new file mode 100644
+--- /dev/null
++++ b/runtime/src/beetle_observe.cpp
+@@ -0,0 +1,106 @@
++/* Bounded, observation-only CPU probes for the independent Beetle process. */
++#include <cstdint>
++#include <cstdio>
++#include "mednafen/psx/psx.h"
++
++namespace {
++constexpr uint32_t cycle_capacity = 4096;
++struct CycleHit { uint32_t pc; uint64_t cycles; };
++CycleHit cycle_hits[cycle_capacity];
++uint32_t anchor_raw, anchor_phys, end_raw, end_phys, max_hits, hits;
++bool armed, in_region;
++uint64_t region_start;
++
++void observe_instruction(uint32_t pc, uint64_t cycles) {
++    if (!armed) return;
++    const uint32_t phys = pc & 0x1fffffffu;
++    if (end_phys) {
++        if (!in_region) {
++            if (phys == anchor_phys) { region_start = cycles; in_region = true; }
++            return;
++        }
++        if (phys != end_phys) return;
++        cycles -= region_start;
++        in_region = false;
++    } else if (phys != anchor_phys) return;
++    cycle_hits[hits++] = {pc, cycles};
++    if (hits == max_hits) armed = false;
++}
++
++constexpr uint32_t exception_capacity = 512;
++struct ExceptionHit {
++    uint64_t sequence, cycles;
++    uint32_t code, pc, epc, sr, cause;
++};
++ExceptionHit exceptions[exception_capacity];
++uint64_t exception_total;
++
++void observe_exception(uint32_t code, uint32_t pc, uint32_t epc,
++                       uint32_t sr, uint32_t cause) {
++    const uint64_t seq = exception_total++;
++    exceptions[seq % exception_capacity] =
++        {seq, beetle_core_get_guest_cycles(), code, pc, epc, sr, cause};
++}
++}
++
++extern "C" void beetle_observe_init(void) {
++    armed = in_region = false;
++    hits = 0;
++    exception_total = 0;
++    g_psxrecomp_insn_cb = observe_instruction;
++    g_psxrecomp_exc_cb = observe_exception;
++}
++
++extern "C" void beetle_cyc_watch_arm(uint32_t start, uint32_t end, int n) {
++    anchor_raw = start; anchor_phys = start & 0x1fffffffu;
++    end_raw = end; end_phys = end & 0x1fffffffu;
++    max_hits = n > 0 ? (uint32_t)n : 16u;
++    if (max_hits > cycle_capacity) max_hits = cycle_capacity;
++    hits = 0; in_region = false; armed = true;
++}
++
++extern "C" void beetle_cyc_watch_clear(void) {
++    armed = in_region = false; hits = 0;
++}
++
++extern "C" void beetle_cyc_watch_get_state(uint32_t *ar, uint32_t *ap,
++    uint32_t *er, uint32_t *ep, uint32_t *limit, uint32_t *count, int *active) {
++    if (ar) *ar = anchor_raw;
++    if (ap) *ap = anchor_phys;
++    if (er) *er = end_raw;
++    if (ep) *ep = end_phys;
++    if (limit) *limit = max_hits;
++    if (count) *count = hits;
++    if (active) *active = armed;
++}
++
++extern "C" int beetle_cyc_watch_get(uint32_t i, uint32_t *index,
++    uint32_t *pc, unsigned long long *cycles) {
++    if (i >= hits) return 0;
++    if (index) *index = i;
++    if (pc) *pc = cycle_hits[i].pc;
++    if (cycles) *cycles = cycle_hits[i].cycles;
++    return 1;
++}
++
++extern "C" int retro_psxref_exc_ring_dump(char *out, int cap) {
++    if (!out || cap <= 0) return -1;
++    int pos = std::snprintf(out, (size_t)cap,
++        "{\"ok\":true,\"total\":%llu,\"entries\":[",
++        (unsigned long long)exception_total);
++    if (pos < 0 || pos >= cap) return -1;
++    uint64_t first = exception_total > exception_capacity
++        ? exception_total - exception_capacity : 0;
++    for (uint64_t i = first; i < exception_total; ++i) {
++        const auto &e = exceptions[i % exception_capacity];
++        int n = std::snprintf(out + pos, (size_t)(cap - pos),
++            "%s{\"seq\":%llu,\"cycles\":%llu,\"code\":%u,\"pc\":\"0x%08X\","
++            "\"epc\":\"0x%08X\",\"sr\":\"0x%08X\",\"cause\":\"0x%08X\"}",
++            i == first ? "" : ",", (unsigned long long)e.sequence,
++            (unsigned long long)e.cycles, e.code, e.pc, e.epc, e.sr, e.cause);
++        if (n < 0 || n >= cap - pos) return -1;
++        pos += n;
++    }
++    int n = std::snprintf(out + pos, (size_t)(cap - pos), "]}");
++    return n < 0 || n >= cap - pos ? -1 : pos + n;
++}
+diff --git a/runtime/src/gpu_sw_attributes.h b/runtime/src/gpu_sw_attributes.h
+new file mode 100644
+--- /dev/null
++++ b/runtime/src/gpu_sw_attributes.h
+@@ -0,0 +1,35 @@
++#ifndef PSX_GPU_SW_ATTRIBUTES_H
++#define PSX_GPU_SW_ATTRIBUTES_H
++
++#include <stdint.h>
++
++/* PS1 attribute planes: signed 12-fraction-bit derivatives, accumulated in
++ * wrapping 8.24 coordinates. Coverage edge rounding must never change UVs.
++ * Reference: Beetle mednafen/psx/gpu_polygon.cpp CalcIDeltas/DrawTriangle.
++ * Select the leftmost original vertex, with Beetle's exact tie ordering. */
++typedef struct { uint32_t base, dx, dy; } PSXAttribute;
++
++static inline PSXAttribute psx_attribute(int x0, int y0, int a0,
++                                        int x1, int y1, int a1,
++                                        int x2, int y2, int a2, int scale) {
++    int64_t den = (int64_t)(x1-x0)*(y2-y1) - (int64_t)(x2-x1)*(y1-y0);
++    PSXAttribute p = {0, 0, 0};
++    if (!den) return p;
++    int64_t nx = (int64_t)(a1-a0)*(y2-y1) - (int64_t)(a2-a1)*(y1-y0);
++    int64_t ny = (int64_t)(x1-x0)*(a2-a1) - (int64_t)(x2-x1)*(a1-a0);
++    p.dx = (uint32_t)(nx * 4096 / den) << 12;
++    p.dy = (uint32_t)(ny * 4096 / den) << 12;
++    int c = x1 <= x0 ? (x2 <= x1 ? 2 : 1) : (x2 < x0 ? 2 : 0);
++    int x = c == 0 ? x0 : c == 1 ? x1 : x2;
++    int y = c == 0 ? y0 : c == 1 ? y1 : y2;
++    int a = c == 0 ? a0 : c == 1 ? a1 : a2;
++    p.base = ((uint32_t)a << 24) + (uint32_t)(0x800000 / scale)
++           - p.dx * (uint32_t)x - p.dy * (uint32_t)y;
++    return p;
++}
++
++static inline uint32_t psx_attribute_at(PSXAttribute p, int x, int y) {
++    return p.base + p.dx * (uint32_t)x + p.dy * (uint32_t)y;
++}
++
++#endif
+diff --git a/runtime/src/gpu_wide_gradient.h b/runtime/src/gpu_wide_gradient.h
+new file mode 100644
+--- /dev/null
++++ b/runtime/src/gpu_wide_gradient.h
+@@ -0,0 +1,22 @@
++#ifndef PSX_GPU_WIDE_GRADIENT_H
++#define PSX_GPU_WIDE_GRADIENT_H
++#include <stdint.h>
++
++/* Both horizontal edges must cover the viewport. A bounding box alone is
++ * insufficient: a sloping world polygon can leave a viewport corner exposed. */
++static inline int psx_wide_flat_overlay_covers(const int32_t *x, const int32_t *y,
++    int left, int top, int right, int bottom) {
++    return y[0] == y[1] && y[2] == y[3] && y[0] <= top && y[2] > bottom
++        && x[0] <= left && x[2] <= left && x[1] > right && x[3] > right;
++}
++
++/* Only an opaque, axis-aligned, full-draw-area vertical gradient is eligible.
++ * Exact bounds exclude dialog boxes and perspective-distorted world geometry.
++ * Vertices are the post-offset GP0 G4 order: TL, TR, BL, BR. */
++static inline int psx_wide_gradient_covers(const int32_t *x, const int32_t *y,
++    const uint32_t *rgb, int left, int top, int right, int bottom) {
++    return x[0] == x[2] && x[1] == x[3] && y[0] == y[1] && y[2] == y[3]
++        && x[0] <= left && x[1] > right && y[0] <= top && y[2] > bottom
++        && rgb[0] == rgb[1] && rgb[2] == rgb[3];
++}
++#endif
+diff --git a/runtime/tests/gpu_raster_beetle.json b/runtime/tests/gpu_raster_beetle.json
+new file mode 100644
+--- /dev/null
++++ b/runtime/tests/gpu_raster_beetle.json
+@@ -0,0 +1,3141 @@
++{
++  "cases": 116,
++  "failed": 0,
++  "different_pixels": 0,
++  "comparison": "pixels",
++  "beetle_commit": "5759277be50052b9f3f388578bf56cc7899d833f",
++  "results": [
++    {
++      "case": 0,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          7,
++          9,
++          4,
++          8
++        ],
++        [
++          81,
++          18,
++          98,
++          3
++        ],
++        [
++          17,
++          92,
++          12,
++          104
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 1,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          7,
++          9,
++          4,
++          8
++        ],
++        [
++          17,
++          92,
++          12,
++          104
++        ],
++        [
++          81,
++          18,
++          98,
++          3
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 2,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          81,
++          18,
++          98,
++          3
++        ],
++        [
++          7,
++          9,
++          4,
++          8
++        ],
++        [
++          17,
++          92,
++          12,
++          104
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 3,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          81,
++          18,
++          98,
++          3
++        ],
++        [
++          17,
++          92,
++          12,
++          104
++        ],
++        [
++          7,
++          9,
++          4,
++          8
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 4,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          17,
++          92,
++          12,
++          104
++        ],
++        [
++          7,
++          9,
++          4,
++          8
++        ],
++        [
++          81,
++          18,
++          98,
++          3
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 5,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          17,
++          92,
++          12,
++          104
++        ],
++        [
++          81,
++          18,
++          98,
++          3
++        ],
++        [
++          7,
++          9,
++          4,
++          8
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 6,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          12,
++          12,
++          0,
++          0
++        ],
++        [
++          108,
++          12,
++          95,
++          0
++        ],
++        [
++          12,
++          108,
++          0,
++          95
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef",
++      "beetle_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef"
++    },
++    {
++      "case": 7,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          12,
++          12,
++          0,
++          0
++        ],
++        [
++          12,
++          108,
++          0,
++          95
++        ],
++        [
++          108,
++          12,
++          95,
++          0
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477",
++      "beetle_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477"
++    },
++    {
++      "case": 8,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          108,
++          12,
++          95,
++          0
++        ],
++        [
++          12,
++          12,
++          0,
++          0
++        ],
++        [
++          12,
++          108,
++          0,
++          95
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477",
++      "beetle_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477"
++    },
++    {
++      "case": 9,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          108,
++          12,
++          95,
++          0
++        ],
++        [
++          12,
++          108,
++          0,
++          95
++        ],
++        [
++          12,
++          12,
++          0,
++          0
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef",
++      "beetle_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef"
++    },
++    {
++      "case": 10,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          12,
++          108,
++          0,
++          95
++        ],
++        [
++          12,
++          12,
++          0,
++          0
++        ],
++        [
++          108,
++          12,
++          95,
++          0
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef",
++      "beetle_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef"
++    },
++    {
++      "case": 11,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          12,
++          108,
++          0,
++          95
++        ],
++        [
++          108,
++          12,
++          95,
++          0
++        ],
++        [
++          12,
++          12,
++          0,
++          0
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477",
++      "beetle_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477"
++    },
++    {
++      "case": 12,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          19,
++          91,
++          250,
++          5
++        ],
++        [
++          23,
++          8,
++          0,
++          250
++        ],
++        [
++          100,
++          91,
++          5,
++          5
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 13,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          19,
++          91,
++          250,
++          5
++        ],
++        [
++          100,
++          91,
++          5,
++          5
++        ],
++        [
++          23,
++          8,
++          0,
++          250
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 14,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          23,
++          8,
++          0,
++          250
++        ],
++        [
++          19,
++          91,
++          250,
++          5
++        ],
++        [
++          100,
++          91,
++          5,
++          5
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 15,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          23,
++          8,
++          0,
++          250
++        ],
++        [
++          100,
++          91,
++          5,
++          5
++        ],
++        [
++          19,
++          91,
++          250,
++          5
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 16,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          100,
++          91,
++          5,
++          5
++        ],
++        [
++          19,
++          91,
++          250,
++          5
++        ],
++        [
++          23,
++          8,
++          0,
++          250
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 17,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          100,
++          91,
++          5,
++          5
++        ],
++        [
++          23,
++          8,
++          0,
++          250
++        ],
++        [
++          19,
++          91,
++          250,
++          5
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 18,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          109,
++          95,
++          69,
++          72
++        ],
++        [
++          -3,
++          125,
++          18,
++          162
++        ],
++        [
++          116,
++          66,
++          105,
++          234
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "933e51080b5a16a2c0cea420817f0575df0ce2635089a00a9fba936dafa94955",
++      "beetle_sha256": "933e51080b5a16a2c0cea420817f0575df0ce2635089a00a9fba936dafa94955"
++    },
++    {
++      "case": 19,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          18,
++          41,
++          132,
++          22
++        ],
++        [
++          97,
++          20,
++          48,
++          24
++        ],
++        [
++          40,
++          -19,
++          3,
++          119
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "e971ab68daa4af378f9f9b7984c19216cd92b8cbc99dd726ab2643bd2e1c6979",
++      "beetle_sha256": "e971ab68daa4af378f9f9b7984c19216cd92b8cbc99dd726ab2643bd2e1c6979"
++    },
++    {
++      "case": 20,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          44,
++          -3,
++          23,
++          102
++        ],
++        [
++          36,
++          -6,
++          74,
++          217
++        ],
++        [
++          62,
++          44,
++          181,
++          245
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "5c42360ffe9eb1ac53aa1f7e79172f40f57e8d14292fe32d75d321349d1fbc65",
++      "beetle_sha256": "5c42360ffe9eb1ac53aa1f7e79172f40f57e8d14292fe32d75d321349d1fbc65"
++    },
++    {
++      "case": 21,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          29,
++          12,
++          233,
++          254
++        ],
++        [
++          -5,
++          117,
++          226,
++          63
++        ],
++        [
++          -14,
++          113,
++          203,
++          136
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4daea6e874720cee1f2c0e5fb86bce833efc7f4f636a103120eb565b5fb6cf0e",
++      "beetle_sha256": "4daea6e874720cee1f2c0e5fb86bce833efc7f4f636a103120eb565b5fb6cf0e"
++    },
++    {
++      "case": 22,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          23,
++          131,
++          94,
++          42
++        ],
++        [
++          -3,
++          -2,
++          103,
++          155
++        ],
++        [
++          26,
++          102,
++          185,
++          131
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "77019e176f2f5e8ba1d42378edefbbabd8ab4e0c401871d8482f77a5853b5594",
++      "beetle_sha256": "77019e176f2f5e8ba1d42378edefbbabd8ab4e0c401871d8482f77a5853b5594"
++    },
++    {
++      "case": 23,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          37,
++          44,
++          38,
++          13
++        ],
++        [
++          28,
++          4,
++          169,
++          37
++        ],
++        [
++          -10,
++          91,
++          56,
++          249
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "d3a48f76f5ccf07443314dc935273c9f9cc2297449041d9c7ca7de1814415374",
++      "beetle_sha256": "d3a48f76f5ccf07443314dc935273c9f9cc2297449041d9c7ca7de1814415374"
++    },
++    {
++      "case": 24,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          77,
++          96,
++          39,
++          112
++        ],
++        [
++          34,
++          5,
++          129,
++          32
++        ],
++        [
++          106,
++          -15,
++          242,
++          237
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "cd13e1612caf2e746f294ddcbe4160a2c67a67c4ac1eb7bdd0612de82a565941",
++      "beetle_sha256": "cd13e1612caf2e746f294ddcbe4160a2c67a67c4ac1eb7bdd0612de82a565941"
++    },
++    {
++      "case": 25,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          124,
++          31,
++          188,
++          58
++        ],
++        [
++          118,
++          55,
++          217,
++          3
++        ],
++        [
++          37,
++          70,
++          99,
++          117
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "e3f869c832538d27baaaf4f7502bc4984fe8263a475f9f17134a2436ac372c44",
++      "beetle_sha256": "e3f869c832538d27baaaf4f7502bc4984fe8263a475f9f17134a2436ac372c44"
++    },
++    {
++      "case": 26,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          91,
++          58,
++          248,
++          63
++        ],
++        [
++          67,
++          55,
++          10,
++          7
++        ],
++        [
++          52,
++          66,
++          234,
++          143
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "01b2d096c85fe11e12840485e6649fee24caaf57cfe0f69465f420f132da51ea",
++      "beetle_sha256": "01b2d096c85fe11e12840485e6649fee24caaf57cfe0f69465f420f132da51ea"
++    },
++    {
++      "case": 27,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          82,
++          11,
++          215,
++          225
++        ],
++        [
++          -16,
++          -3,
++          20,
++          178
++        ],
++        [
++          116,
++          146,
++          224,
++          47
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "0467be2611e65e66f245af9c8db32f9377d7df07c9bc1564ba92bf1794b84a9c",
++      "beetle_sha256": "0467be2611e65e66f245af9c8db32f9377d7df07c9bc1564ba92bf1794b84a9c"
++    },
++    {
++      "case": 28,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          -16,
++          2,
++          213,
++          215
++        ],
++        [
++          94,
++          126,
++          113,
++          159
++        ],
++        [
++          70,
++          146,
++          187,
++          13
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "80d2a9658ed8c46ebb21890b997adae79a60806a44e0363d5eebb10f65369cab",
++      "beetle_sha256": "80d2a9658ed8c46ebb21890b997adae79a60806a44e0363d5eebb10f65369cab"
++    },
++    {
++      "case": 29,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          106,
++          97,
++          104,
++          152
++        ],
++        [
++          108,
++          25,
++          166,
++          112
++        ],
++        [
++          141,
++          27,
++          189,
++          253
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "0a19adcec59579b634cabd6c3e4cc8137ef635d45979249078ccd4f8f2e46a6c",
++      "beetle_sha256": "0a19adcec59579b634cabd6c3e4cc8137ef635d45979249078ccd4f8f2e46a6c"
++    },
++    {
++      "case": 30,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          115,
++          38,
++          165,
++          69
++        ],
++        [
++          86,
++          20,
++          95,
++          155
++        ],
++        [
++          6,
++          120,
++          70,
++          30
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "b2a4b726c0c2a089eac762665f31e80d5e6df304dc8d92b181a1e992b4999d6d",
++      "beetle_sha256": "b2a4b726c0c2a089eac762665f31e80d5e6df304dc8d92b181a1e992b4999d6d"
++    },
++    {
++      "case": 31,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          97,
++          90,
++          7,
++          195
++        ],
++        [
++          -5,
++          110,
++          155,
++          150
++        ],
++        [
++          3,
++          81,
++          37,
++          146
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "6069dca8c07a0b6ef163cf4566dc7e7355a1dace54f58d0c401b1d8fe87a4fd0",
++      "beetle_sha256": "6069dca8c07a0b6ef163cf4566dc7e7355a1dace54f58d0c401b1d8fe87a4fd0"
++    },
++    {
++      "case": 32,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          40,
++          146,
++          157,
++          210
++        ],
++        [
++          128,
++          77,
++          109,
++          173
++        ],
++        [
++          46,
++          135,
++          12,
++          17
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "c3f1a618e4dd7ab65d860127b7bc7e406b6385eac6b17fe2395d1359501c65d0",
++      "beetle_sha256": "c3f1a618e4dd7ab65d860127b7bc7e406b6385eac6b17fe2395d1359501c65d0"
++    },
++    {
++      "case": 33,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          59,
++          115,
++          165,
++          216
++        ],
++        [
++          43,
++          61,
++          249,
++          252
++        ],
++        [
++          89,
++          121,
++          175,
++          51
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "50cdbdeb420faccb76004adfcce72ef2a853e9cb0a59f192dbda1564ed8f045f",
++      "beetle_sha256": "50cdbdeb420faccb76004adfcce72ef2a853e9cb0a59f192dbda1564ed8f045f"
++    },
++    {
++      "case": 34,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          136,
++          60,
++          61,
++          58
++        ],
++        [
++          -19,
++          91,
++          68,
++          127
++        ],
++        [
++          -1,
++          -15,
++          93,
++          142
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "1a3a709a18bbe3ec46b59534673293bdd0fb52b72c500a7167a1f1961019283c",
++      "beetle_sha256": "1a3a709a18bbe3ec46b59534673293bdd0fb52b72c500a7167a1f1961019283c"
++    },
++    {
++      "case": 35,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          92,
++          68,
++          123,
++          221
++        ],
++        [
++          -19,
++          120,
++          140,
++          154
++        ],
++        [
++          43,
++          26,
++          155,
++          114
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "78b732a27ff97ea87d6345e00691ac5edc9ea1345fb29b0e4b9038ef05334173",
++      "beetle_sha256": "78b732a27ff97ea87d6345e00691ac5edc9ea1345fb29b0e4b9038ef05334173"
++    },
++    {
++      "case": 36,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          66,
++          -15,
++          192,
++          249
++        ],
++        [
++          127,
++          94,
++          10,
++          145
++        ],
++        [
++          87,
++          127,
++          176,
++          124
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "9b08189f896d39669d06b76a7a67bf03fb23b8420523fcd56677590bd4c6021a",
++      "beetle_sha256": "9b08189f896d39669d06b76a7a67bf03fb23b8420523fcd56677590bd4c6021a"
++    },
++    {
++      "case": 37,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          69,
++          -11,
++          45,
++          169
++        ],
++        [
++          33,
++          131,
++          242,
++          22
++        ],
++        [
++          79,
++          1,
++          216,
++          16
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "748f74664cefffa78b6180236eadc43e9319d8dc7b1bdeaed2f01a9fc65409cd",
++      "beetle_sha256": "748f74664cefffa78b6180236eadc43e9319d8dc7b1bdeaed2f01a9fc65409cd"
++    },
++    {
++      "case": 38,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          -13,
++          91,
++          60,
++          49
++        ],
++        [
++          67,
++          71,
++          65,
++          233
++        ],
++        [
++          145,
++          3,
++          210,
++          212
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "8b734936b560aef2b7b16982e9c14815e5f60e3fd79d44bf0693cd00962bc97f",
++      "beetle_sha256": "8b734936b560aef2b7b16982e9c14815e5f60e3fd79d44bf0693cd00962bc97f"
++    },
++    {
++      "case": 39,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          68,
++          32,
++          226,
++          62
++        ],
++        [
++          138,
++          129,
++          29,
++          6
++        ],
++        [
++          15,
++          72,
++          53,
++          125
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4e489f098059e3e400c668a6070749f14faa8cd132d0af27ea2fbcb3dd8cfc18",
++      "beetle_sha256": "4e489f098059e3e400c668a6070749f14faa8cd132d0af27ea2fbcb3dd8cfc18"
++    },
++    {
++      "case": 40,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          118,
++          30,
++          172,
++          82
++        ],
++        [
++          77,
++          37,
++          181,
++          92
++        ],
++        [
++          114,
++          135,
++          58,
++          121
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "a7889342093a9bdd68893cced412e4acf8784eb6ef4dcadcb4856990bf22d52e",
++      "beetle_sha256": "a7889342093a9bdd68893cced412e4acf8784eb6ef4dcadcb4856990bf22d52e"
++    },
++    {
++      "case": 41,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          13,
++          7,
++          59,
++          104
++        ],
++        [
++          103,
++          141,
++          248,
++          146
++        ],
++        [
++          -11,
++          119,
++          255,
++          63
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "e94fee00912e4e9a0f8d7ca3d1caa1e2dcd3ba134d5e824154488115bfd2f88a",
++      "beetle_sha256": "e94fee00912e4e9a0f8d7ca3d1caa1e2dcd3ba134d5e824154488115bfd2f88a"
++    },
++    {
++      "case": 42,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          51,
++          18,
++          207,
++          150
++        ],
++        [
++          28,
++          7,
++          74,
++          93
++        ],
++        [
++          87,
++          -20,
++          225,
++          163
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "ce9922fa9afb39903ca0df0b1fc5a68080dfd5a4aa16ccc62d8609c26f498098",
++      "beetle_sha256": "ce9922fa9afb39903ca0df0b1fc5a68080dfd5a4aa16ccc62d8609c26f498098"
++    },
++    {
++      "case": 43,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          59,
++          136,
++          60,
++          211
++        ],
++        [
++          52,
++          125,
++          192,
++          5
++        ],
++        [
++          87,
++          74,
++          68,
++          129
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "7b8d749a4a3932f4814d8dd125e84f10a0d91ad17c1c22c500f8a8e486ae9c03",
++      "beetle_sha256": "7b8d749a4a3932f4814d8dd125e84f10a0d91ad17c1c22c500f8a8e486ae9c03"
++    },
++    {
++      "case": 44,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          -12,
++          60,
++          43,
++          193
++        ],
++        [
++          116,
++          91,
++          159,
++          10
++        ],
++        [
++          -2,
++          106,
++          146,
++          35
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "e42319b707c6b379e1a10bec448d9432c3dcd2c8c2ecb55ea9023c63f35c12ab",
++      "beetle_sha256": "e42319b707c6b379e1a10bec448d9432c3dcd2c8c2ecb55ea9023c63f35c12ab"
++    },
++    {
++      "case": 45,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          97,
++          116,
++          116,
++          128
++        ],
++        [
++          101,
++          11,
++          105,
++          202
++        ],
++        [
++          60,
++          95,
++          224,
++          42
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "748c26ea9f519c2fedc778a89b1f0ee19ffe9fafe25a5dbba9267dad6828adb1",
++      "beetle_sha256": "748c26ea9f519c2fedc778a89b1f0ee19ffe9fafe25a5dbba9267dad6828adb1"
++    },
++    {
++      "case": 46,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          73,
++          147,
++          122,
++          3
++        ],
++        [
++          97,
++          88,
++          53,
++          121
++        ],
++        [
++          -3,
++          47,
++          130,
++          134
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "74ec94b507ca45ebc6f0002e50524544c2b6f7873c3c314a1f1ad0a8add626ca",
++      "beetle_sha256": "74ec94b507ca45ebc6f0002e50524544c2b6f7873c3c314a1f1ad0a8add626ca"
++    },
++    {
++      "case": 47,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          105,
++          56,
++          160,
++          85
++        ],
++        [
++          11,
++          1,
++          108,
++          248
++        ],
++        [
++          15,
++          115,
++          149,
++          31
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "9e4ba170b98a18bb56238903dbbb63c7a441a0cceb9abbb20b9386b50fa6139b",
++      "beetle_sha256": "9e4ba170b98a18bb56238903dbbb63c7a441a0cceb9abbb20b9386b50fa6139b"
++    },
++    {
++      "case": 48,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          -4,
++          93,
++          172,
++          63
++        ],
++        [
++          -20,
++          13,
++          113,
++          1
++        ],
++        [
++          83,
++          4,
++          30,
++          161
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "7b8a4f6b7ca3455cac10087332879925febcb83a1eb337dbeb6cd68db38d0718",
++      "beetle_sha256": "7b8a4f6b7ca3455cac10087332879925febcb83a1eb337dbeb6cd68db38d0718"
++    },
++    {
++      "case": 49,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          43,
++          66,
++          64,
++          138
++        ],
++        [
++          73,
++          120,
++          92,
++          230
++        ],
++        [
++          -1,
++          92,
++          227,
++          189
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "0ee164ee7b43bd96d15bad0e3ee20165b5e84c1983a92694e2ef1405012c3663",
++      "beetle_sha256": "0ee164ee7b43bd96d15bad0e3ee20165b5e84c1983a92694e2ef1405012c3663"
++    },
++    {
++      "case": 50,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          16,
++          86,
++          110,
++          156
++        ],
++        [
++          129,
++          57,
++          18,
++          64
++        ],
++        [
++          135,
++          3,
++          14,
++          20
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "17d445c5c7df5dc4b17180b900cc25cc3ab741bbd5bbbf29dd08f6933a2c263d",
++      "beetle_sha256": "17d445c5c7df5dc4b17180b900cc25cc3ab741bbd5bbbf29dd08f6933a2c263d"
++    },
++    {
++      "case": 51,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          40,
++          43,
++          143,
++          180
++        ],
++        [
++          56,
++          101,
++          105,
++          42
++        ],
++        [
++          21,
++          76,
++          90,
++          209
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "452a3ef23cff087a2add2c536fdf26e4d7d8e9853a1330964ab8edaac1f83d05",
++      "beetle_sha256": "452a3ef23cff087a2add2c536fdf26e4d7d8e9853a1330964ab8edaac1f83d05"
++    },
++    {
++      "case": 52,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          35,
++          48,
++          69,
++          221
++        ],
++        [
++          114,
++          103,
++          20,
++          229
++        ],
++        [
++          90,
++          -7,
++          211,
++          251
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "1bcf72c66e10fbd467e1677cade56e28d74485b699bdc66234d873e63f7e6d71",
++      "beetle_sha256": "1bcf72c66e10fbd467e1677cade56e28d74485b699bdc66234d873e63f7e6d71"
++    },
++    {
++      "case": 53,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          68,
++          130,
++          124,
++          44
++        ],
++        [
++          18,
++          104,
++          26,
++          105
++        ],
++        [
++          -20,
++          80,
++          121,
++          127
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "db94aa4d3d6889c51459e6bef7c5a9d0041362fd0d28de8ffd18c9877cb43bbc",
++      "beetle_sha256": "db94aa4d3d6889c51459e6bef7c5a9d0041362fd0d28de8ffd18c9877cb43bbc"
++    },
++    {
++      "case": 54,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          50,
++          12,
++          74,
++          93
++        ],
++        [
++          62,
++          -12,
++          136,
++          235
++        ],
++        [
++          120,
++          105,
++          226,
++          66
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "44cb73897bc1be8d6ecffd461d679171493f2dff6cdab544707b57ce054526e9",
++      "beetle_sha256": "44cb73897bc1be8d6ecffd461d679171493f2dff6cdab544707b57ce054526e9"
++    },
++    {
++      "case": 55,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          64,
++          45,
++          167,
++          157
++        ],
++        [
++          136,
++          117,
++          174,
++          98
++        ],
++        [
++          138,
++          122,
++          198,
++          10
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "7a1a65d1c2e37c23a61df1350b8ecbd400d2f2108180eeb76bfac9f8d6d9f76d",
++      "beetle_sha256": "7a1a65d1c2e37c23a61df1350b8ecbd400d2f2108180eeb76bfac9f8d6d9f76d"
++    },
++    {
++      "case": 56,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          121,
++          22,
++          185,
++          236
++        ],
++        [
++          -16,
++          91,
++          41,
++          95
++        ],
++        [
++          133,
++          28,
++          72,
++          56
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "acebcfe0dce177910d471ef5e3face6597818197d37d3e93b16a787482bed3ca",
++      "beetle_sha256": "acebcfe0dce177910d471ef5e3face6597818197d37d3e93b16a787482bed3ca"
++    },
++    {
++      "case": 57,
++      "shaded_raw": false,
++      "vertices": [
++        [
++          1,
++          133,
++          90,
++          181
++        ],
++        [
++          13,
++          136,
++          104,
++          216
++        ],
++        [
++          20,
++          86,
++          211,
++          26
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "db235fc4ffe346582667202e8718b8bc4737763cd69b6b873dd0d189e98c1e0d",
++      "beetle_sha256": "db235fc4ffe346582667202e8718b8bc4737763cd69b6b873dd0d189e98c1e0d"
++    },
++    {
++      "case": 0,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          7,
++          9,
++          4,
++          8
++        ],
++        [
++          81,
++          18,
++          98,
++          3
++        ],
++        [
++          17,
++          92,
++          12,
++          104
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 1,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          7,
++          9,
++          4,
++          8
++        ],
++        [
++          17,
++          92,
++          12,
++          104
++        ],
++        [
++          81,
++          18,
++          98,
++          3
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 2,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          81,
++          18,
++          98,
++          3
++        ],
++        [
++          7,
++          9,
++          4,
++          8
++        ],
++        [
++          17,
++          92,
++          12,
++          104
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 3,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          81,
++          18,
++          98,
++          3
++        ],
++        [
++          17,
++          92,
++          12,
++          104
++        ],
++        [
++          7,
++          9,
++          4,
++          8
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 4,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          17,
++          92,
++          12,
++          104
++        ],
++        [
++          7,
++          9,
++          4,
++          8
++        ],
++        [
++          81,
++          18,
++          98,
++          3
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 5,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          17,
++          92,
++          12,
++          104
++        ],
++        [
++          81,
++          18,
++          98,
++          3
++        ],
++        [
++          7,
++          9,
++          4,
++          8
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614",
++      "beetle_sha256": "4cfc371760fb4648cb9a807cade0d1c5d7b9b3a7f5920c5a9144dc2cf54d1614"
++    },
++    {
++      "case": 6,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          12,
++          12,
++          0,
++          0
++        ],
++        [
++          108,
++          12,
++          95,
++          0
++        ],
++        [
++          12,
++          108,
++          0,
++          95
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef",
++      "beetle_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef"
++    },
++    {
++      "case": 7,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          12,
++          12,
++          0,
++          0
++        ],
++        [
++          12,
++          108,
++          0,
++          95
++        ],
++        [
++          108,
++          12,
++          95,
++          0
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477",
++      "beetle_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477"
++    },
++    {
++      "case": 8,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          108,
++          12,
++          95,
++          0
++        ],
++        [
++          12,
++          12,
++          0,
++          0
++        ],
++        [
++          12,
++          108,
++          0,
++          95
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477",
++      "beetle_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477"
++    },
++    {
++      "case": 9,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          108,
++          12,
++          95,
++          0
++        ],
++        [
++          12,
++          108,
++          0,
++          95
++        ],
++        [
++          12,
++          12,
++          0,
++          0
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef",
++      "beetle_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef"
++    },
++    {
++      "case": 10,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          12,
++          108,
++          0,
++          95
++        ],
++        [
++          12,
++          12,
++          0,
++          0
++        ],
++        [
++          108,
++          12,
++          95,
++          0
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef",
++      "beetle_sha256": "d2e2dbc887085723f57d3305f4da9c06d3f67a3c8db722ab2cfe3d6dc50d09ef"
++    },
++    {
++      "case": 11,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          12,
++          108,
++          0,
++          95
++        ],
++        [
++          108,
++          12,
++          95,
++          0
++        ],
++        [
++          12,
++          12,
++          0,
++          0
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477",
++      "beetle_sha256": "fcb3c780d477fa09b030af8e14555ff64a92f609b06516b91334522654cdc477"
++    },
++    {
++      "case": 12,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          19,
++          91,
++          250,
++          5
++        ],
++        [
++          23,
++          8,
++          0,
++          250
++        ],
++        [
++          100,
++          91,
++          5,
++          5
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 13,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          19,
++          91,
++          250,
++          5
++        ],
++        [
++          100,
++          91,
++          5,
++          5
++        ],
++        [
++          23,
++          8,
++          0,
++          250
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 14,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          23,
++          8,
++          0,
++          250
++        ],
++        [
++          19,
++          91,
++          250,
++          5
++        ],
++        [
++          100,
++          91,
++          5,
++          5
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 15,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          23,
++          8,
++          0,
++          250
++        ],
++        [
++          100,
++          91,
++          5,
++          5
++        ],
++        [
++          19,
++          91,
++          250,
++          5
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 16,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          100,
++          91,
++          5,
++          5
++        ],
++        [
++          19,
++          91,
++          250,
++          5
++        ],
++        [
++          23,
++          8,
++          0,
++          250
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 17,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          100,
++          91,
++          5,
++          5
++        ],
++        [
++          23,
++          8,
++          0,
++          250
++        ],
++        [
++          19,
++          91,
++          250,
++          5
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346",
++      "beetle_sha256": "04c3268f1fe08e6d72b5e3139b79d3e7e2255a89a942e78f38a478c1aaee6346"
++    },
++    {
++      "case": 18,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          109,
++          95,
++          69,
++          72
++        ],
++        [
++          -3,
++          125,
++          18,
++          162
++        ],
++        [
++          116,
++          66,
++          105,
++          234
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "933e51080b5a16a2c0cea420817f0575df0ce2635089a00a9fba936dafa94955",
++      "beetle_sha256": "933e51080b5a16a2c0cea420817f0575df0ce2635089a00a9fba936dafa94955"
++    },
++    {
++      "case": 19,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          18,
++          41,
++          132,
++          22
++        ],
++        [
++          97,
++          20,
++          48,
++          24
++        ],
++        [
++          40,
++          -19,
++          3,
++          119
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "e971ab68daa4af378f9f9b7984c19216cd92b8cbc99dd726ab2643bd2e1c6979",
++      "beetle_sha256": "e971ab68daa4af378f9f9b7984c19216cd92b8cbc99dd726ab2643bd2e1c6979"
++    },
++    {
++      "case": 20,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          44,
++          -3,
++          23,
++          102
++        ],
++        [
++          36,
++          -6,
++          74,
++          217
++        ],
++        [
++          62,
++          44,
++          181,
++          245
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "5c42360ffe9eb1ac53aa1f7e79172f40f57e8d14292fe32d75d321349d1fbc65",
++      "beetle_sha256": "5c42360ffe9eb1ac53aa1f7e79172f40f57e8d14292fe32d75d321349d1fbc65"
++    },
++    {
++      "case": 21,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          29,
++          12,
++          233,
++          254
++        ],
++        [
++          -5,
++          117,
++          226,
++          63
++        ],
++        [
++          -14,
++          113,
++          203,
++          136
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4daea6e874720cee1f2c0e5fb86bce833efc7f4f636a103120eb565b5fb6cf0e",
++      "beetle_sha256": "4daea6e874720cee1f2c0e5fb86bce833efc7f4f636a103120eb565b5fb6cf0e"
++    },
++    {
++      "case": 22,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          23,
++          131,
++          94,
++          42
++        ],
++        [
++          -3,
++          -2,
++          103,
++          155
++        ],
++        [
++          26,
++          102,
++          185,
++          131
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "77019e176f2f5e8ba1d42378edefbbabd8ab4e0c401871d8482f77a5853b5594",
++      "beetle_sha256": "77019e176f2f5e8ba1d42378edefbbabd8ab4e0c401871d8482f77a5853b5594"
++    },
++    {
++      "case": 23,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          37,
++          44,
++          38,
++          13
++        ],
++        [
++          28,
++          4,
++          169,
++          37
++        ],
++        [
++          -10,
++          91,
++          56,
++          249
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "d3a48f76f5ccf07443314dc935273c9f9cc2297449041d9c7ca7de1814415374",
++      "beetle_sha256": "d3a48f76f5ccf07443314dc935273c9f9cc2297449041d9c7ca7de1814415374"
++    },
++    {
++      "case": 24,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          77,
++          96,
++          39,
++          112
++        ],
++        [
++          34,
++          5,
++          129,
++          32
++        ],
++        [
++          106,
++          -15,
++          242,
++          237
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "cd13e1612caf2e746f294ddcbe4160a2c67a67c4ac1eb7bdd0612de82a565941",
++      "beetle_sha256": "cd13e1612caf2e746f294ddcbe4160a2c67a67c4ac1eb7bdd0612de82a565941"
++    },
++    {
++      "case": 25,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          124,
++          31,
++          188,
++          58
++        ],
++        [
++          118,
++          55,
++          217,
++          3
++        ],
++        [
++          37,
++          70,
++          99,
++          117
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "e3f869c832538d27baaaf4f7502bc4984fe8263a475f9f17134a2436ac372c44",
++      "beetle_sha256": "e3f869c832538d27baaaf4f7502bc4984fe8263a475f9f17134a2436ac372c44"
++    },
++    {
++      "case": 26,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          91,
++          58,
++          248,
++          63
++        ],
++        [
++          67,
++          55,
++          10,
++          7
++        ],
++        [
++          52,
++          66,
++          234,
++          143
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "01b2d096c85fe11e12840485e6649fee24caaf57cfe0f69465f420f132da51ea",
++      "beetle_sha256": "01b2d096c85fe11e12840485e6649fee24caaf57cfe0f69465f420f132da51ea"
++    },
++    {
++      "case": 27,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          82,
++          11,
++          215,
++          225
++        ],
++        [
++          -16,
++          -3,
++          20,
++          178
++        ],
++        [
++          116,
++          146,
++          224,
++          47
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "0467be2611e65e66f245af9c8db32f9377d7df07c9bc1564ba92bf1794b84a9c",
++      "beetle_sha256": "0467be2611e65e66f245af9c8db32f9377d7df07c9bc1564ba92bf1794b84a9c"
++    },
++    {
++      "case": 28,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          -16,
++          2,
++          213,
++          215
++        ],
++        [
++          94,
++          126,
++          113,
++          159
++        ],
++        [
++          70,
++          146,
++          187,
++          13
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "80d2a9658ed8c46ebb21890b997adae79a60806a44e0363d5eebb10f65369cab",
++      "beetle_sha256": "80d2a9658ed8c46ebb21890b997adae79a60806a44e0363d5eebb10f65369cab"
++    },
++    {
++      "case": 29,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          106,
++          97,
++          104,
++          152
++        ],
++        [
++          108,
++          25,
++          166,
++          112
++        ],
++        [
++          141,
++          27,
++          189,
++          253
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "0a19adcec59579b634cabd6c3e4cc8137ef635d45979249078ccd4f8f2e46a6c",
++      "beetle_sha256": "0a19adcec59579b634cabd6c3e4cc8137ef635d45979249078ccd4f8f2e46a6c"
++    },
++    {
++      "case": 30,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          115,
++          38,
++          165,
++          69
++        ],
++        [
++          86,
++          20,
++          95,
++          155
++        ],
++        [
++          6,
++          120,
++          70,
++          30
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "b2a4b726c0c2a089eac762665f31e80d5e6df304dc8d92b181a1e992b4999d6d",
++      "beetle_sha256": "b2a4b726c0c2a089eac762665f31e80d5e6df304dc8d92b181a1e992b4999d6d"
++    },
++    {
++      "case": 31,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          97,
++          90,
++          7,
++          195
++        ],
++        [
++          -5,
++          110,
++          155,
++          150
++        ],
++        [
++          3,
++          81,
++          37,
++          146
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "6069dca8c07a0b6ef163cf4566dc7e7355a1dace54f58d0c401b1d8fe87a4fd0",
++      "beetle_sha256": "6069dca8c07a0b6ef163cf4566dc7e7355a1dace54f58d0c401b1d8fe87a4fd0"
++    },
++    {
++      "case": 32,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          40,
++          146,
++          157,
++          210
++        ],
++        [
++          128,
++          77,
++          109,
++          173
++        ],
++        [
++          46,
++          135,
++          12,
++          17
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "c3f1a618e4dd7ab65d860127b7bc7e406b6385eac6b17fe2395d1359501c65d0",
++      "beetle_sha256": "c3f1a618e4dd7ab65d860127b7bc7e406b6385eac6b17fe2395d1359501c65d0"
++    },
++    {
++      "case": 33,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          59,
++          115,
++          165,
++          216
++        ],
++        [
++          43,
++          61,
++          249,
++          252
++        ],
++        [
++          89,
++          121,
++          175,
++          51
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "50cdbdeb420faccb76004adfcce72ef2a853e9cb0a59f192dbda1564ed8f045f",
++      "beetle_sha256": "50cdbdeb420faccb76004adfcce72ef2a853e9cb0a59f192dbda1564ed8f045f"
++    },
++    {
++      "case": 34,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          136,
++          60,
++          61,
++          58
++        ],
++        [
++          -19,
++          91,
++          68,
++          127
++        ],
++        [
++          -1,
++          -15,
++          93,
++          142
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "1a3a709a18bbe3ec46b59534673293bdd0fb52b72c500a7167a1f1961019283c",
++      "beetle_sha256": "1a3a709a18bbe3ec46b59534673293bdd0fb52b72c500a7167a1f1961019283c"
++    },
++    {
++      "case": 35,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          92,
++          68,
++          123,
++          221
++        ],
++        [
++          -19,
++          120,
++          140,
++          154
++        ],
++        [
++          43,
++          26,
++          155,
++          114
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "78b732a27ff97ea87d6345e00691ac5edc9ea1345fb29b0e4b9038ef05334173",
++      "beetle_sha256": "78b732a27ff97ea87d6345e00691ac5edc9ea1345fb29b0e4b9038ef05334173"
++    },
++    {
++      "case": 36,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          66,
++          -15,
++          192,
++          249
++        ],
++        [
++          127,
++          94,
++          10,
++          145
++        ],
++        [
++          87,
++          127,
++          176,
++          124
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "9b08189f896d39669d06b76a7a67bf03fb23b8420523fcd56677590bd4c6021a",
++      "beetle_sha256": "9b08189f896d39669d06b76a7a67bf03fb23b8420523fcd56677590bd4c6021a"
++    },
++    {
++      "case": 37,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          69,
++          -11,
++          45,
++          169
++        ],
++        [
++          33,
++          131,
++          242,
++          22
++        ],
++        [
++          79,
++          1,
++          216,
++          16
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "748f74664cefffa78b6180236eadc43e9319d8dc7b1bdeaed2f01a9fc65409cd",
++      "beetle_sha256": "748f74664cefffa78b6180236eadc43e9319d8dc7b1bdeaed2f01a9fc65409cd"
++    },
++    {
++      "case": 38,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          -13,
++          91,
++          60,
++          49
++        ],
++        [
++          67,
++          71,
++          65,
++          233
++        ],
++        [
++          145,
++          3,
++          210,
++          212
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "8b734936b560aef2b7b16982e9c14815e5f60e3fd79d44bf0693cd00962bc97f",
++      "beetle_sha256": "8b734936b560aef2b7b16982e9c14815e5f60e3fd79d44bf0693cd00962bc97f"
++    },
++    {
++      "case": 39,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          68,
++          32,
++          226,
++          62
++        ],
++        [
++          138,
++          129,
++          29,
++          6
++        ],
++        [
++          15,
++          72,
++          53,
++          125
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "4e489f098059e3e400c668a6070749f14faa8cd132d0af27ea2fbcb3dd8cfc18",
++      "beetle_sha256": "4e489f098059e3e400c668a6070749f14faa8cd132d0af27ea2fbcb3dd8cfc18"
++    },
++    {
++      "case": 40,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          118,
++          30,
++          172,
++          82
++        ],
++        [
++          77,
++          37,
++          181,
++          92
++        ],
++        [
++          114,
++          135,
++          58,
++          121
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "a7889342093a9bdd68893cced412e4acf8784eb6ef4dcadcb4856990bf22d52e",
++      "beetle_sha256": "a7889342093a9bdd68893cced412e4acf8784eb6ef4dcadcb4856990bf22d52e"
++    },
++    {
++      "case": 41,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          13,
++          7,
++          59,
++          104
++        ],
++        [
++          103,
++          141,
++          248,
++          146
++        ],
++        [
++          -11,
++          119,
++          255,
++          63
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "e94fee00912e4e9a0f8d7ca3d1caa1e2dcd3ba134d5e824154488115bfd2f88a",
++      "beetle_sha256": "e94fee00912e4e9a0f8d7ca3d1caa1e2dcd3ba134d5e824154488115bfd2f88a"
++    },
++    {
++      "case": 42,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          51,
++          18,
++          207,
++          150
++        ],
++        [
++          28,
++          7,
++          74,
++          93
++        ],
++        [
++          87,
++          -20,
++          225,
++          163
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "ce9922fa9afb39903ca0df0b1fc5a68080dfd5a4aa16ccc62d8609c26f498098",
++      "beetle_sha256": "ce9922fa9afb39903ca0df0b1fc5a68080dfd5a4aa16ccc62d8609c26f498098"
++    },
++    {
++      "case": 43,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          59,
++          136,
++          60,
++          211
++        ],
++        [
++          52,
++          125,
++          192,
++          5
++        ],
++        [
++          87,
++          74,
++          68,
++          129
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "7b8d749a4a3932f4814d8dd125e84f10a0d91ad17c1c22c500f8a8e486ae9c03",
++      "beetle_sha256": "7b8d749a4a3932f4814d8dd125e84f10a0d91ad17c1c22c500f8a8e486ae9c03"
++    },
++    {
++      "case": 44,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          -12,
++          60,
++          43,
++          193
++        ],
++        [
++          116,
++          91,
++          159,
++          10
++        ],
++        [
++          -2,
++          106,
++          146,
++          35
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "e42319b707c6b379e1a10bec448d9432c3dcd2c8c2ecb55ea9023c63f35c12ab",
++      "beetle_sha256": "e42319b707c6b379e1a10bec448d9432c3dcd2c8c2ecb55ea9023c63f35c12ab"
++    },
++    {
++      "case": 45,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          97,
++          116,
++          116,
++          128
++        ],
++        [
++          101,
++          11,
++          105,
++          202
++        ],
++        [
++          60,
++          95,
++          224,
++          42
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "748c26ea9f519c2fedc778a89b1f0ee19ffe9fafe25a5dbba9267dad6828adb1",
++      "beetle_sha256": "748c26ea9f519c2fedc778a89b1f0ee19ffe9fafe25a5dbba9267dad6828adb1"
++    },
++    {
++      "case": 46,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          73,
++          147,
++          122,
++          3
++        ],
++        [
++          97,
++          88,
++          53,
++          121
++        ],
++        [
++          -3,
++          47,
++          130,
++          134
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "74ec94b507ca45ebc6f0002e50524544c2b6f7873c3c314a1f1ad0a8add626ca",
++      "beetle_sha256": "74ec94b507ca45ebc6f0002e50524544c2b6f7873c3c314a1f1ad0a8add626ca"
++    },
++    {
++      "case": 47,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          105,
++          56,
++          160,
++          85
++        ],
++        [
++          11,
++          1,
++          108,
++          248
++        ],
++        [
++          15,
++          115,
++          149,
++          31
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "9e4ba170b98a18bb56238903dbbb63c7a441a0cceb9abbb20b9386b50fa6139b",
++      "beetle_sha256": "9e4ba170b98a18bb56238903dbbb63c7a441a0cceb9abbb20b9386b50fa6139b"
++    },
++    {
++      "case": 48,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          -4,
++          93,
++          172,
++          63
++        ],
++        [
++          -20,
++          13,
++          113,
++          1
++        ],
++        [
++          83,
++          4,
++          30,
++          161
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "7b8a4f6b7ca3455cac10087332879925febcb83a1eb337dbeb6cd68db38d0718",
++      "beetle_sha256": "7b8a4f6b7ca3455cac10087332879925febcb83a1eb337dbeb6cd68db38d0718"
++    },
++    {
++      "case": 49,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          43,
++          66,
++          64,
++          138
++        ],
++        [
++          73,
++          120,
++          92,
++          230
++        ],
++        [
++          -1,
++          92,
++          227,
++          189
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "0ee164ee7b43bd96d15bad0e3ee20165b5e84c1983a92694e2ef1405012c3663",
++      "beetle_sha256": "0ee164ee7b43bd96d15bad0e3ee20165b5e84c1983a92694e2ef1405012c3663"
++    },
++    {
++      "case": 50,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          16,
++          86,
++          110,
++          156
++        ],
++        [
++          129,
++          57,
++          18,
++          64
++        ],
++        [
++          135,
++          3,
++          14,
++          20
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "17d445c5c7df5dc4b17180b900cc25cc3ab741bbd5bbbf29dd08f6933a2c263d",
++      "beetle_sha256": "17d445c5c7df5dc4b17180b900cc25cc3ab741bbd5bbbf29dd08f6933a2c263d"
++    },
++    {
++      "case": 51,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          40,
++          43,
++          143,
++          180
++        ],
++        [
++          56,
++          101,
++          105,
++          42
++        ],
++        [
++          21,
++          76,
++          90,
++          209
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "452a3ef23cff087a2add2c536fdf26e4d7d8e9853a1330964ab8edaac1f83d05",
++      "beetle_sha256": "452a3ef23cff087a2add2c536fdf26e4d7d8e9853a1330964ab8edaac1f83d05"
++    },
++    {
++      "case": 52,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          35,
++          48,
++          69,
++          221
++        ],
++        [
++          114,
++          103,
++          20,
++          229
++        ],
++        [
++          90,
++          -7,
++          211,
++          251
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "1bcf72c66e10fbd467e1677cade56e28d74485b699bdc66234d873e63f7e6d71",
++      "beetle_sha256": "1bcf72c66e10fbd467e1677cade56e28d74485b699bdc66234d873e63f7e6d71"
++    },
++    {
++      "case": 53,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          68,
++          130,
++          124,
++          44
++        ],
++        [
++          18,
++          104,
++          26,
++          105
++        ],
++        [
++          -20,
++          80,
++          121,
++          127
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "db94aa4d3d6889c51459e6bef7c5a9d0041362fd0d28de8ffd18c9877cb43bbc",
++      "beetle_sha256": "db94aa4d3d6889c51459e6bef7c5a9d0041362fd0d28de8ffd18c9877cb43bbc"
++    },
++    {
++      "case": 54,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          50,
++          12,
++          74,
++          93
++        ],
++        [
++          62,
++          -12,
++          136,
++          235
++        ],
++        [
++          120,
++          105,
++          226,
++          66
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "44cb73897bc1be8d6ecffd461d679171493f2dff6cdab544707b57ce054526e9",
++      "beetle_sha256": "44cb73897bc1be8d6ecffd461d679171493f2dff6cdab544707b57ce054526e9"
++    },
++    {
++      "case": 55,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          64,
++          45,
++          167,
++          157
++        ],
++        [
++          136,
++          117,
++          174,
++          98
++        ],
++        [
++          138,
++          122,
++          198,
++          10
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "7a1a65d1c2e37c23a61df1350b8ecbd400d2f2108180eeb76bfac9f8d6d9f76d",
++      "beetle_sha256": "7a1a65d1c2e37c23a61df1350b8ecbd400d2f2108180eeb76bfac9f8d6d9f76d"
++    },
++    {
++      "case": 56,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          121,
++          22,
++          185,
++          236
++        ],
++        [
++          -16,
++          91,
++          41,
++          95
++        ],
++        [
++          133,
++          28,
++          72,
++          56
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "acebcfe0dce177910d471ef5e3face6597818197d37d3e93b16a787482bed3ca",
++      "beetle_sha256": "acebcfe0dce177910d471ef5e3face6597818197d37d3e93b16a787482bed3ca"
++    },
++    {
++      "case": 57,
++      "shaded_raw": true,
++      "vertices": [
++        [
++          1,
++          133,
++          90,
++          181
++        ],
++        [
++          13,
++          136,
++          104,
++          216
++        ],
++        [
++          20,
++          86,
++          211,
++          26
++        ]
++      ],
++      "different_pixels": 0,
++      "native_sha256": "db235fc4ffe346582667202e8718b8bc4737763cd69b6b873dd0d189e98c1e0d",
++      "beetle_sha256": "db235fc4ffe346582667202e8718b8bc4737763cd69b6b873dd0d189e98c1e0d"
++    }
++  ]
++}
+diff --git a/runtime/tests/gpu_sw_probe_support.c b/runtime/tests/gpu_sw_probe_support.c
+new file mode 100644
+--- /dev/null
++++ b/runtime/tests/gpu_sw_probe_support.c
+@@ -0,0 +1,5 @@
++/* Native-only rasterizer test linkage. A wide-compositor call is a test error. */
++#include <stdlib.h>
++int g_ws_bd_stretch_on;
++int g_ws_bd_stretch_pct;
++int psx_ws_prim_in_backdrop(void) { abort(); }
+diff --git a/runtime/tests/test_gpu_wide_gradient.c b/runtime/tests/test_gpu_wide_gradient.c
+new file mode 100644
+--- /dev/null
++++ b/runtime/tests/test_gpu_wide_gradient.c
+@@ -0,0 +1,36 @@
++#include "gpu_wide_gradient.h"
++#include <stdio.h>
++
++#define CHECK(expr) do { if (!(expr)) { fprintf(stderr, "FAIL line %d\n", __LINE__); return 1; } } while (0)
++int main(void) {
++    /* Observed full-screen G4 geometry, expressed without any game assets. */
++    int32_t x[4] = {-128, 256, -128, 256};
++    int32_t y[4] = {240, 240, 480, 480};
++    uint32_t rgb[4] = {0x303830, 0x303830, 0x603830, 0x603830};
++    CHECK(psx_wide_gradient_covers(x, y, rgb, 0, 240, 255, 479));
++    /* A dialog, horizontal gradient, or projected world polygon must not
++     * replace the extra scenery with a sampled screen-edge color. */
++    y[0] = y[1] = 300;
++    CHECK(!psx_wide_gradient_covers(x, y, rgb, 0, 240, 255, 479));
++    y[0] = y[1] = 240;
++    rgb[1]++;
++    CHECK(!psx_wide_gradient_covers(x, y, rgb, 0, 240, 255, 479));
++    rgb[1]--;
++    x[3]--;
++    CHECK(!psx_wide_gradient_covers(x, y, rgb, 0, 240, 255, 479));
++    x[3]++;
++    x[1] = x[3] = 255;
++    CHECK(!psx_wide_gradient_covers(x, y, rgb, 0, 240, 255, 479));
++    /* The observed fade has a sloping left edge entirely outside the view. */
++    int32_t fx[4] = {0, 256, -128, 256};
++    int32_t fy[4] = {240, 240, 496, 496};
++    CHECK(psx_wide_flat_overlay_covers(fx, fy, 0, 240, 255, 479));
++    fx[0] = 1;
++    CHECK(!psx_wide_flat_overlay_covers(fx, fy, 0, 240, 255, 479));
++    fx[0] = 0; fx[2] = 1;
++    CHECK(!psx_wide_flat_overlay_covers(fx, fy, 0, 240, 255, 479));
++    fx[2] = -128; fy[3]--;
++    CHECK(!psx_wide_flat_overlay_covers(fx, fy, 0, 240, 255, 479));
++    puts("ALL PASS");
++    return 0;
++}
+diff --git a/runtime/tests/test_gpu_wide_gradient_surface.py b/runtime/tests/test_gpu_wide_gradient_surface.py
+new file mode 100644
+--- /dev/null
++++ b/runtime/tests/test_gpu_wide_gradient_surface.py
+@@ -0,0 +1,87 @@
++"""Check reveal rows against the rendered SSAA surface, including subrows."""
++import ctypes as c
++import sys
++
++
++def verify(lib, scale, base, band):
++    vram = (c.c_uint16 * (1024 * 512))()
++    lib.sw_renderer_init(vram)
++    lib.sw_renderer_set_scale(scale)
++    lib.sw_wide_configure(342, 43)
++    lib.sw_wide_set_target(base)
++    lib.sw_set_draw_area(base, band, base + 255, band + 239)
++    lib.sw_set_draw_offset(0, 0)
++    lib.sw_set_mask_bits(0, 0)
++    lib.sw_set_semi_transparency(0, 0)
++    lib.sw_wide_clear(base, 0, 512, 0x1234)
++    # A steep vertical gradient produces different values within a native row
++    # at SSAA 2/4, exposing native-row replication rather than subrow copying.
++    for y in range(band, band + 240, 8):
++        lib.sw_draw_gouraud_triangle(base, y, 0, base + 256, y, 0,
++                                    base, y + 8, 0x7fff)
++        lib.sw_draw_gouraud_triangle(base, y + 8, 0x7fff, base + 256, y, 0,
++                                    base + 256, y + 8, 0x7fff)
++    w, h, m = 342 * scale, 512 * scale, 43 * scale
++    before = (c.c_uint32 * (w * h))()
++    after = (c.c_uint32 * (w * h))()
++    native = (c.c_uint32 * (256 * scale * h))()
++    canonical_before = bytes(vram)
++    assert lib.sw_render_display_hires(native, 256 * scale * 4, base, 0, 256, 512) == len(native)
++    assert lib.sw_render_wide_display(before, w * 4, base, 0, 512) == len(before)
++    lib.sw_wide_extend_gradient(base, band, 240)
++    assert lib.sw_render_wide_display(after, w * 4, base, 0, 512) == len(after)
++    assert bytes(vram) == canonical_before
++    native_after = type(native)()
++    lib.sw_render_display_hires(native_after, 256 * scale * 4, base, 0, 256, 512)
++    assert bytes(native_after) == bytes(native)
++    for y in range(h):
++        a = list(after[y * w:(y + 1) * w])
++        b = list(before[y * w:(y + 1) * w])
++        if band * scale <= y < (band + 240) * scale:
++            assert a[:m] == [native[y * 256 * scale]] * m, (scale, base, band, y, 'left')
++            assert a[-m:] == [native[(y + 1) * 256 * scale - 1]] * m, (scale, base, band, y, 'right')
++            assert a[m:-m] == b[m:-m]
++        else:
++            assert a == b, (scale, base, band, y, 'other band')
++    if scale > 1:
++        assert any(native[y * 256 * scale] != native[(y + 1) * 256 * scale]
++                   for y in range(band * scale, (band + 8) * scale - 1) if y % scale != scale - 1)
++    # The fade is applied once over the wide surface only. Every blend mode
++    # must agree with the same backend's canonical rectangle, with no diagonal
++    # double blend and no writes into the other double-buffer band.
++    for mode in range(4):
++        lib.sw_set_semi_transparency(0, 0)
++        lib.sw_wide_disable_target()
++        lib.sw_fill_rect(base, band, 256, 240, 0x6318)
++        lib.sw_wide_set_target(base)
++        lib.sw_wide_clear(base, 0, 512, 0x1234)
++        lib.sw_wide_clear(base, band, 240, 0x6318)
++        lib.sw_wide_disable_target()
++        lib.sw_set_semi_transparency(1, mode)
++        lib.sw_draw_flat_rect(base, band, 256, 240, 0x2108)
++        lib.sw_render_display_hires(native, 256 * scale * 4, base, 0, 256, 512)
++        lib.sw_wide_set_target(base)
++        lib.sw_render_wide_display(before, w * 4, base, 0, 512)
++        saved = bytes(vram)
++        # Authored 256-high splash filters exceed the 240-row draw band.
++        lib.sw_wide_flat_overlay(band, 256, 0x2108)
++        assert bytes(vram) == saved
++        lib.sw_render_display_hires(native_after, 256 * scale * 4, base, 0, 256, 512)
++        assert bytes(native_after) == bytes(native)
++        lib.sw_render_wide_display(after, w * 4, base, 0, 512)
++        for y in range(h):
++            a = list(after[y * w:(y + 1) * w])
++            if band * scale <= y < (band + 240) * scale:
++                assert a == [native[y * 256 * scale]] * w, (scale, mode, y)
++            else:
++                assert a == list(before[y * w:(y + 1) * w])
++
++
++if __name__ == '__main__':
++    lib = c.CDLL(sys.argv[1])
++    lib.sw_renderer_init.argtypes = [c.POINTER(c.c_uint16)]
++    for scale in (1, 2, 4):
++        for base in (0, 256):
++            for band in (0, 240):
++                verify(lib, scale, base, band)
++    print('12 surface cases passed: scales 1/2/4, both buffer bands and bases; canonical and centre unchanged')
+diff --git a/tools/build_beetle_oracle.ps1 b/tools/build_beetle_oracle.ps1
+new file mode 100644
+--- /dev/null
++++ b/tools/build_beetle_oracle.ps1
+@@ -0,0 +1,64 @@
++[CmdletBinding()]
++param(
++    [string]$MsysRoot = 'C:\msys64',
++    [int]$Jobs = 8
++)
++$ErrorActionPreference = 'Stop'
++$frameworkRoot = Split-Path -Parent $PSScriptRoot
++$coreRoot = Join-Path $frameworkRoot 'beetle-psx'
++$pin = '5759277be50052b9f3f388578bf56cc7899d833f'
++$patch = Join-Path $frameworkRoot 'docs/beetle_oracle_hooks.patch'
++$mingw = Join-Path $MsysRoot 'mingw64'
++$bash = Join-Path $MsysRoot 'usr/bin/bash.exe'
++$cmake = Join-Path $mingw 'bin/cmake.exe'
++foreach ($required in @($bash, $cmake, (Join-Path $mingw 'bin/g++.exe'),
++                        (Join-Path $mingw 'include/zlib.h'),
++                        (Join-Path $mingw 'lib/pkgconfig/sdl2.pc'))) {
++    if (-not (Test-Path -LiteralPath $required)) { throw "Missing build dependency: $required" }
++}
++if ($Jobs -lt 1 -or $Jobs -gt 64) { throw 'Jobs must be in 1..64' }
++$oldPath = $env:PATH
++try {
++    $env:PATH = (Join-Path $mingw 'bin') + ';' + $env:PATH
++    if (-not (Test-Path -LiteralPath $coreRoot)) {
++        git clone https://github.com/libretro/beetle-psx-libretro.git $coreRoot
++        if ($LASTEXITCODE -ne 0) { throw 'Beetle clone failed' }
++        git -C $coreRoot checkout --detach $pin
++        if ($LASTEXITCODE -ne 0) { throw 'Beetle checkout failed' }
++    }
++    $actual = (git -C $coreRoot rev-parse HEAD).Trim()
++    if ($actual -ne $pin) { throw "Beetle checkout must be pinned at $pin; found $actual. Existing files were preserved." }
++    $alreadyPatched = $false
++    try {
++        git -C $coreRoot apply --reverse --check $patch 2>$null
++        $alreadyPatched = $LASTEXITCODE -eq 0
++    } catch {
++        # Windows PowerShell can turn the expected reverse-check stderr into
++        # a NativeCommandError. The forward check below decides applicability.
++        $alreadyPatched = $false
++    }
++    if (-not $alreadyPatched) {
++        git -C $coreRoot apply --check $patch
++        if ($LASTEXITCODE -ne 0) { throw 'Oracle patch conflicts with the existing tree; no changes applied' }
++        git -C $coreRoot apply $patch
++        if ($LASTEXITCODE -ne 0) { throw 'Oracle patch failed' }
++    }
++    Push-Location $coreRoot
++    try {
++        & $bash -c "export PATH=/mingw64/bin:/usr/bin:`$PATH; /usr/bin/make -s platform=mingw_x86_64 STATIC_LINKING=1 HAVE_LIGHTREC=0 -j$Jobs"
++        if ($LASTEXITCODE -ne 0) { throw 'Beetle static-library build failed' }
++        Copy-Item -LiteralPath 'mednafen_psx_libretro.dll' -Destination 'libmednafen_psx.a'
++    } finally { Pop-Location }
++    $build = Join-Path $frameworkRoot 'runtime/build-oracle'
++    & $cmake -S (Join-Path $frameworkRoot 'runtime') -B $build -G Ninja `
++        -DCMAKE_BUILD_TYPE=RelWithDebInfo -DPSX_DEBUG_TOOLS=ON `
++        -DPSX_RECOMP_UI=OFF -DPSX_REWIND=OFF -DPSX_NETPLAY=OFF `
++        -DPSXRECOMP_ALLOW_NO_BIOS=ON -DBUILD_TESTING=OFF `
++        -DPSX_SDL_BACKEND=SDL2 -DPSX_ENABLE_VULKAN=OFF -DPSX_DEPS_OFFLINE=ON `
++        -DCMAKE_C_COMPILER_LAUNCHER= -DCMAKE_CXX_COMPILER_LAUNCHER= `
++        "-DZLIB_INCLUDE_DIR=$mingw/include" "-DZLIB_LIBRARY=$mingw/lib/libz.a"
++    if ($LASTEXITCODE -ne 0) { throw 'Oracle CMake configuration failed' }
++    & $cmake --build $build --target psx-beetle "-j$Jobs"
++    if ($LASTEXITCODE -ne 0) { throw 'Oracle executable build failed' }
++    Write-Output (Join-Path $build 'psx-beetle.exe')
++} finally { $env:PATH = $oldPath }
+diff --git a/tools/verify_beetle_oracle.py b/tools/verify_beetle_oracle.py
+new file mode 100644
+--- /dev/null
++++ b/tools/verify_beetle_oracle.py
+@@ -0,0 +1,103 @@
++#!/usr/bin/env python3
++"""Verify a running oracle using real TCP observations; writes summary JSON.
++
++Keep --out under a gitignored build directory. Screenshots and audio created
++alongside it remain local. --anchor and --end must name observed executable
++addresses in the running program, not guessed function seeds.
++"""
++import argparse
++import hashlib
++import json
++import socket
++import time
++import wave
++from pathlib import Path
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__)
++    ap.add_argument('--port', type=int, default=4380)
++    ap.add_argument('--bios', type=Path, required=True)
++    ap.add_argument('--anchor', required=True)
++    ap.add_argument('--end', required=True)
++    ap.add_argument('--out', type=Path, required=True)
++    args = ap.parse_args()
++    args.out.parent.mkdir(parents=True, exist_ok=True)
++    result = {'status': 'running', 'port': args.port}
++
++    def call(cmd, **kwargs):
++        with socket.create_connection(('127.0.0.1', args.port), 5) as sock:
++            sock.settimeout(10)
++            sock.sendall((json.dumps(dict(cmd=cmd, id=1, **kwargs)) + '\n').encode())
++            response = json.loads(sock.makefile('rb').readline())
++        if not response.get('ok'):
++            raise RuntimeError(f'{cmd}: {response}')
++        return response
++
++    def collect_cycles(**kwargs):
++        call('cyc_watch', pc=args.anchor, n=8, **kwargs)
++        deadline = time.monotonic() + 8
++        while True:
++            data = call('cyc_watch_dump')
++            if data['hits'] == 8:
++                assert len(data['entries']) == 8 and not data['armed']
++                return data
++            if time.monotonic() >= deadline:
++                raise RuntimeError('cycle anchor did not execute eight times')
++            time.sleep(.1)
++
++    try:
++        first = call('ping')
++        assert first['backend'] == 'beetle'
++        result['first'] = first
++        actual = bytes.fromhex(call('read_ram', addr='0x1FC00000', len=524288)['hex'])
++        assert actual == args.bios.read_bytes(), 'loaded BIOS differs from requested image'
++        result['bios_sha256'] = hashlib.sha256(actual).hexdigest()
++        result['single'] = collect_cycles()
++        samples = [x['cycles'] for x in result['single']['entries']]
++        assert all(b > a for a, b in zip(samples, samples[1:]))
++        result['region'] = collect_cycles(end=args.end)
++        assert all(e['cycles'] > 0 for e in result['region']['entries'])
++        call('cyc_watch_clear')
++        cleared = call('cyc_watch_dump')
++        assert cleared['hits'] == 0 and not cleared['armed']
++        call('fntrace_unfiltered', on=1)
++        call('devtrace_ctl', reset=1, arm=1)
++        call('set_input', buttons='0xFFFF')
++        time.sleep(.3)
++        pad = call('pad_status')
++        assert pad['override'] == 65535 and pad['pad'] == '0xFFFF'
++        call('clear_input')
++        assert call('pad_status')['override'] == -1
++        for cmd in ('wtrace_dump', 'rtrace_dump', 'fntrace_dump', 'sio_trace',
++                    'cdrom_cmd_dump', 'spu_events', 'devtrace_dump', 'exc_ring'):
++            data = call(cmd, count=8)
++            entries = data.get('entries', data.get('events', []))
++            assert entries and data['total'] > 0, f'{cmd} contains no observations'
++            result[cmd] = {'total': data['total'], 'sample_count': len(entries)}
++        result['cdc_volume'] = call('cdc_volume')
++        shot = args.out.with_suffix('.png').resolve()
++        result['screenshot'] = call('screenshot', path=shot.as_posix())
++        assert shot.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
++        audio = args.out.with_suffix('.wav').resolve()
++        result['audio'] = call('audio_wav', path=audio.as_posix(), count=44100)
++        with wave.open(str(audio)) as stream:
++            assert stream.getnchannels() == 2 and stream.getframerate() == 44100
++            assert stream.getnframes() == 44100
++        final = call('ping')
++        assert final['frame'] > first['frame'] and final['guest_cycles'] > first['guest_cycles']
++        result['last'] = final
++        result['cycles_per_frame'] = (final['guest_cycles'] - first['guest_cycles']) / (final['frame'] - first['frame'])
++        result['status'] = 'passed'
++    except Exception as exc:
++        result['status'] = 'failed'
++        result['error'] = str(exc)
++        raise
++    finally:
++        args.out.write_text(json.dumps(result, indent=2) + '\n')
++    print(json.dumps({'status': result['status'], 'proof': str(args.out),
++                      'cycles_per_frame': result['cycles_per_frame']}))
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/tools/verify_gpu_raster.py b/tools/verify_gpu_raster.py
+new file mode 100644
+--- /dev/null
++++ b/tools/verify_gpu_raster.py
+@@ -0,0 +1,97 @@
++"""Compare the real software rasterizer with Beetle's TCP GPU probe.
++
++The DLL is built from gpu_sw_renderer.c, gpu_vram_dirty.c and
++runtime/tests/gpu_sw_probe_support.c. No guest assets or generated code.
++"""
++import argparse
++import ctypes as C
++import itertools
++import hashlib
++import json
++import random
++import socket
++import struct
++
++
++def query(port, words):
++    with socket.create_connection(('127.0.0.1', port), timeout=30) as s:
++        s.sendall((json.dumps({'id': 1, 'cmd': 'gpu_probe',
++                              'words': ''.join(f'{w:08x}' for w in words)})+'\n').encode())
++        r = json.loads(s.makefile('rb').readline())
++    if not r.get('ok'):
++        raise RuntimeError(r)
++    return [int(r['hex'][i:i+4], 16) for i in range(0, len(r['hex']), 4)]
++
++
++def main():
++    ap = argparse.ArgumentParser(description=__doc__)
++    ap.add_argument('dll')
++    ap.add_argument('--port', type=int, default=4380)
++    ap.add_argument('--output')
++    ap.add_argument('--reference', help='Previously captured Beetle hashes; offline regression')
++    args = ap.parse_args()
++    sw = C.CDLL(args.dll)
++    ram = (C.c_uint16 * (1024 * 512))()
++    cases = []
++    for tri in [((7, 9, 4, 8), (81, 18, 98, 3), (17, 92, 12, 104)),
++                ((12, 12, 0, 0), (108, 12, 95, 0), (12, 108, 0, 95)),
++                ((19, 91, 250, 5), (23, 8, 0, 250), (100, 91, 5, 5))]:
++        cases.extend(itertools.permutations(tri))
++    rng = random.Random(94221)
++    for _ in range(40):
++        cases.append(tuple((rng.randrange(-20, 148), rng.randrange(-20, 148),
++                            rng.randrange(256), rng.randrange(256)) for _ in range(3)))
++    results = []
++    reference = None
++    if args.reference:
++        from pathlib import Path
++        reference = json.loads(Path(args.reference).read_text(encoding='utf-8'))['results']
++    for shaded in (False, True):
++        for index, tri in enumerate(cases):
++            C.memset(ram, 0, C.sizeof(ram))
++            for v in range(256):
++                for u in range(256):
++                    ram[(v+256)*1024+u+512] = 1+(u+v*256)%32767
++            sw.sw_renderer_init(ram)
++            sw.sw_set_draw_area(0, 0, 127, 127)
++            sw.sw_set_color_modulation(128, 128, 128, 1)
++            words = [0x35000000 if shaded else 0x25000000]
++            call = []
++            for i, (x, y, u, v) in enumerate(tri):
++                if shaded and i: words.append(0)
++                words += [(x & 65535) | ((y & 65535) << 16),
++                          u | (v << 8) | (0x118 << 16 if i == 1 else 0)]
++                call += [x, y, u, v]
++                if shaded: call.append(0)
++            if shaded:
++                sw.sw_draw_shaded_textured_triangle(*call, 0, 0, 0x118, 1)
++            else:
++                sw.sw_draw_textured_triangle(*call, 0, 0, 0x118)
++            native = [ram[y*1024+x] for y in range(128) for x in range(128)]
++            digest = hashlib.sha256(struct.pack('<16384H', *native)).hexdigest()
++            if reference is None:
++                oracle = query(args.port, words)
++                expected = hashlib.sha256(struct.pack('<16384H', *oracle)).hexdigest()
++                mismatch = sum(a != b for a, b in zip(native, oracle))
++            else:
++                item = reference[len(results)]
++                assert item['vertices'] == [list(v) for v in tri]
++                assert item['shaded_raw'] == shaded
++                expected = item['beetle_sha256']
++                mismatch = int(digest != expected)
++            results.append({'case': index, 'shaded_raw': shaded, 'vertices': tri,
++                            'different_pixels': mismatch, 'native_sha256': digest,
++                            'beetle_sha256': expected})
++    report = {'cases': len(results), 'failed': sum(r['different_pixels'] != 0 for r in results),
++              'different_pixels': sum(r['different_pixels'] for r in results),
++              'comparison': 'hashes' if reference is not None else 'pixels',
++              'beetle_commit': '5759277be50052b9f3f388578bf56cc7899d833f', 'results': results}
++    if args.output:
++        from pathlib import Path
++        Path(args.output).write_text(json.dumps(report, indent=2)+'\n', encoding='utf-8')
++    print(json.dumps({k: v for k, v in report.items() if k != 'results'}))
++    return int(report['failed'] != 0)
++
++
++if __name__ == '__main__':
++    raise SystemExit(main())

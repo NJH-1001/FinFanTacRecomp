@@ -1,0 +1,24 @@
+format_version = 6
+id = "fft.presentation.widescreen"
+version = "1.0.0"
+name = "Final Fantasy Tactics Widescreen"
+author = "FinFanTacRecomp"
+description = "Optional wider view for the game's 3D scenes."
+license = "MIT"
+resolver = "declarative"
+save_compatibility = "shared"
+
+[[target]]
+game_id = "SCUS-94221"
+
+[[feature]]
+id = "widescreen"
+name = "16:9 3D View"
+description = "Reveals additional scenery in battles and in-game cutscenes. Movies and 2D screens retain their original proportions."
+group = "Visual"
+channel = "experimental"
+default_enabled = false
+
+[[plugin]]
+feature = "widescreen"
+id = "fft.widescreen"

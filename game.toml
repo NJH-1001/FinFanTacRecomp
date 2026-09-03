@@ -1,0 +1,63 @@
+# Autofilled by tools/new_project_layout/probe_disc.py from your legal dump.
+# Review before shipping. Runtime quirks / overlay seeds still need hand work.
+
+[game]
+name = "Final Fantasy Tactics"
+id = "SCUS-94221"
+players = 1
+exe = "disc/SCUS_942.21"
+disc = "disc/Final Fantasy Tactics (USA).cue"
+load_address = "0x80010000"
+entry_pc = "0x80010A30"
+text_size = "0x00056800"
+stack_base = "0x801FFFF0"
+
+# Digests are for data Track 01 (first BINARY FILE / TRACK 01).
+[prepare_disc]
+out_dir = "disc"
+bin_name = "Final Fantasy Tactics (USA).bin"
+cue_name = "Final Fantasy Tactics (USA).cue"
+boot_exe = "SCUS_942.21"
+known_sizes = [541315152]
+known_md5 = [
+  "b156ba386436d20fd5ed8d37bab6b624",
+]
+known_sha1 = [
+  "2b5d4db3229cdc7bbd0358b95fcba33dddae8bba",
+]
+known_crc32 = [
+  "377f6510",
+]
+
+[recompiler]
+seeds = "seeds/ghidra_funcs.txt"
+out_dir = "generated"
+strict = true
+
+[runtime]
+bios_hle = false
+window_title = "Final Fantasy Tactics Recompiled"
+memcard_dir = "saves"
+
+[video]
+renderer = "software"
+aspect_ratio = "4:3"
+
+# The optional game-owned 16:9 mod selects the aspect. This gate recognizes
+# actual GTE projection activity; plain 2D screens and FMVs stay at 4:3.
+[widescreen]
+gte_game_mode = true
+native_wide = true
+
+[controller]
+default_mode = "digital"
+lock_mode = true
+allow_hybrid = false
+p1_device = "auto"
+
+# Online mount gate: digests + track count + optional TOC fingerprint
+# (see docs/NETPLAY.md).
+[netplay]
+require_cue = true
+required_tracks = 1
+required_disc_fp = "0c61a2587348771d1c9c5875b77fe98e51e546745d85098b0c1c9767adb0f49f"
