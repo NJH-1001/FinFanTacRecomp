@@ -10,9 +10,11 @@ and generate the playable executable locally. No disc data, extracted game
 executable, generated game code, retail PlayStation BIOS, saves, captures, or
 analysis databases are included. OpenBIOS is included and used by default.
 
-## Supported target
+## Supported targets
 
 - Windows 10 or 11, x86-64, Intel or AMD processor
+- Linux x86-64
+- macOS 11 or newer, Apple Silicon or Intel
 - Final Fantasy Tactics (USA), `SCUS-94221`
 - Matching Redump-style CUE/BIN disc dump (data track MD5: `b156ba386436d20fd5ed8d37bab6b624`)
 - OpenBIOS with recompiled LLE execution
@@ -20,10 +22,11 @@ analysis databases are included. OpenBIOS is included and used by default.
 
 ## Using a release kit
 
-1. Download `FinFanTacRecomp-setup-0.1.0-windows-x64.zip` from
+1. Download the setup ZIP for your platform from
    [Releases](https://github.com/NJH-1001/FinFanTacRecomp/releases).
 2. Extract the entire ZIP to a writable folder outside `Program Files`.
-3. Run `Final_Fantasy_Tactics_Recompiled.exe`.
+3. On Windows, run `Final_Fantasy_Tactics_Recompiled.exe`. On Linux or macOS,
+   run `Final_Fantasy_Tactics_Recompiled` from a terminal in the extracted folder.
 4. Select your legally obtained USA CUE file, then choose **Generate and Rebuild**.
    Game code is generated and compiled only on your computer.
 5. Reopen the same executable after the build finishes. It starts the locally
@@ -33,6 +36,11 @@ The initial build requires Python 3 and a compatible CMake/Ninja/Clang toolchain
 the setup wizard can download its supported toolchain. Keep the extracted kit
 together. See `README-SETUP.txt` inside the ZIP for setup details. Connect your
 controller before launch and review Player 1's device and bindings in the launcher.
+
+Linux and macOS are initial native setup-host releases built and smoke-tested on
+GitHub-hosted Ubuntu and macOS runners. Gameplay validation remains strongest on
+Windows; platform-specific controller, audio, rendering and full-game behavior
+still need broader physical testing.
 
 ## Optional enhancements
 

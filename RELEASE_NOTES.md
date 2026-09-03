@@ -1,15 +1,18 @@
 # FinFanTacRecomp v0.1.0
 
-Initial public Windows x86-64 setup release for **Final Fantasy Tactics**
-(USA, `SCUS-94221`). Targets Windows 10/11 on Intel and AMD processors.
+Initial public owned-input setup release for **Final Fantasy Tactics**
+(USA, `SCUS-94221`). Kits are provided for Windows x86-64, Linux x86-64,
+macOS Apple Silicon and macOS Intel.
 
 ## Download and setup
 
-Download **FinFanTacRecomp-setup-0.1.0-windows-x64.zip**, extract the entire kit,
-run `Final_Fantasy_Tactics_Recompiled.exe`, select your legally obtained USA
-Redump-style CUE file, and choose **Generate and Rebuild**. Reopen the same
-executable when the build finishes. Python 3 is required; the wizard can obtain
-the supported compiler toolchain. OpenBIOS is included and used by default.
+Download the **FinFanTacRecomp-setup-0.1.0** ZIP for your platform and extract
+the entire kit. Run `Final_Fantasy_Tactics_Recompiled.exe` on Windows or
+`Final_Fantasy_Tactics_Recompiled` from a terminal on Linux/macOS. Select your
+legally obtained USA Redump-style CUE file and choose **Generate and Rebuild**.
+Reopen the same executable when the build finishes. Python 3 is required; the
+wizard can obtain the supported compiler toolchain. OpenBIOS is included and
+used by default.
 
 This is an owned-input build kit, not a playable game download. It contains no
 disc data, extracted game executable, generated game code, retail PlayStation
@@ -47,7 +50,8 @@ generated locally from the player's matching disc.
 - The ZIP passed private-data, source/configuration and archive-integrity audits;
   the extracted setup host passes its Windows DLL-loading smoke check.
 - Extended gameplay, game completion, save/load round trips, live Vulkan parity,
-  separate Windows 10/11 systems and AMD hardware are not yet verified.
+  Linux/macOS gameplay, separate Windows 10/11 systems and AMD hardware are not
+  yet verified. Linux and macOS setup hosts are native-runner smoke tested.
 
 See the repository README for setup, controller compatibility and 16:9 details.
 The accompanying `.sha256` file identifies the exact setup archive.

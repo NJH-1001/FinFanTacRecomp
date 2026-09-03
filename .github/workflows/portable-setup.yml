@@ -1,0 +1,138 @@
+name: Portable setup kits
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            platform: linux-x64
+            output: FinFanTacRecomp-setup-0.1.0-linux-x64.zip
+          - runner: macos-15
+            platform: macos-arm64
+            output: FinFanTacRecomp-setup-0.1.0-macos-arm64.zip
+          - runner: macos-15-intel
+            platform: macos-x64
+            output: FinFanTacRecomp-setup-0.1.0-macos-x64.zip
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          build-essential cmake ninja-build python3 zip
+          libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev
+          libxfixes-dev libxss-dev libxtst-dev libwayland-dev
+          libxkbcommon-dev libgl1-mesa-dev
+
+      - name: Prepare pinned framework
+        run: python3 tools/bootstrap.py
+
+      - name: Configure and build emitters
+        run: |
+          cmake -S psxrecomp/recompiler -B build-recompiler -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DPSXRECOMP_ENABLE_CHD=OFF
+          cmake --build build-recompiler --parallel 3
+
+      - name: Configure data-free setup host
+        run: |
+          EXTRA=()
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            EXTRA+=("-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0")
+          fi
+          cmake -S . -B build-setup -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DPSX_GAME_VERSION=0.1.0 \
+            -DPSXRECOMP_FORCE_SETUP_HOST=ON \
+            -DPSXRECOMP_ALLOW_NO_BIOS=ON \
+            -DPSX_RECOMP_UI=ON \
+            -DPSX_SETUP_WIZARD=ON \
+            -DPSX_DEBUG_TOOLS=ON \
+            -DPSX_SDL_BACKEND=SDL3 \
+            -DCMAKE_DISABLE_FIND_PACKAGE_SDL3=ON \
+            -DPSX_ENABLE_VULKAN=OFF \
+            -DPSX_REWIND=OFF \
+            -DPSX_NETPLAY=OFF \
+            -DBUILD_TESTING=OFF \
+            "${EXTRA[@]}"
+          cmake --build build-setup --target psx-runtime --parallel 3
+
+      - name: Native setup-host smoke test
+        run: |
+          set +e
+          PSX_HEADLESS=1 PSX_BIOS_HLE=0 \
+            ./build-setup/Final_Fantasy_Tactics_Recompiled \
+            --headless --no-launcher >setup-smoke.txt 2>&1
+          status=$?
+          set -e
+          test "$status" -eq 1
+          grep -F "first-run setup host" setup-smoke.txt
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            file build-setup/Final_Fantasy_Tactics_Recompiled | grep -F "ELF 64-bit"
+            ldd build-setup/Final_Fantasy_Tactics_Recompiled
+          else
+            file build-setup/Final_Fantasy_Tactics_Recompiled | grep -F "Mach-O 64-bit"
+            codesign --force --sign - build-setup/Final_Fantasy_Tactics_Recompiled
+            codesign --verify --strict build-setup/Final_Fantasy_Tactics_Recompiled
+            otool -L build-setup/Final_Fantasy_Tactics_Recompiled
+          fi
+
+      - name: Package owned-input setup kit
+        env:
+          CI: "1"
+          EXCLUDE_DEV_MODS: "1"
+        run: bash scripts/package_setup_release.sh build-setup "${{ matrix.platform }}" build-recompiler
+
+      - name: Normalize name and audit package
+        env:
+          OUTPUT: ${{ matrix.output }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mv "dist/fft-0.1.0-${PLATFORM}.zip" "dist/${OUTPUT}"
+          python3 - <<'PY'
+          import hashlib, os, pathlib, zipfile, tomllib
+          archive = pathlib.Path("dist") / os.environ["OUTPUT"]
+          with zipfile.ZipFile(archive) as z:
+              assert z.testzip() is None
+              names = set(z.namelist())
+              assert "generated/" not in names and "disc/" not in names
+              forbidden = {".cue", ".iso", ".chd", ".mcd", ".mcr", ".sav", ".state"}
+              for name in names:
+                  p = pathlib.PurePosixPath(name)
+                  assert ".." not in p.parts and not p.is_absolute()
+                  assert p.suffix.lower() not in forbidden, name
+                  if p.suffix.lower() == ".bin":
+                      assert p.name.lower() == "openbios.bin", name
+                  if "generated" in {x.lower() for x in p.parts}:
+                      assert "rabbitizer" in name.lower(), name
+              config = tomllib.loads(z.read("game.toml").decode())
+              pad = config["controller"]
+              assert pad["default_mode"] == "digital"
+              assert pad["lock_mode"] is True and pad["allow_hybrid"] is False
+              assert config["runtime"]["bios_hle"] is False
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          archive.with_suffix(archive.suffix + ".sha256").write_text(f"{digest}  {archive.name}\n")
+          print(f"AUDIT PASS: {archive.name} ({archive.stat().st_size} bytes, {digest})")
+          PY
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.platform }}
+          path: |
+            dist/${{ matrix.output }}
+            dist/${{ matrix.output }}.sha256
+            setup-smoke.txt
+          if-no-files-found: error
+          retention-days: 7
