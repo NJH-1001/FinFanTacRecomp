@@ -55,3 +55,15 @@ generated locally from the player's matching disc.
 
 See the repository README for setup, controller compatibility and 16:9 details.
 The accompanying `.sha256` file identifies the exact setup archive.
+
+## Release assets
+
+| Platform | Setup kit | SHA-256 |
+|---|---|---|
+| Windows x86-64 | `FinFanTacRecomp-setup-0.1.0-windows-x64.zip` | `24abba72fb9eeb74ab7b96c3b16ef66af528c8751cd8766a4693585a3bf4c4ce` |
+| Linux x86-64 | `FinFanTacRecomp-setup-0.1.0-linux-x64.zip` | `35261675e16a56e73e17faf23814d87746727971443677db4bf9734bf7586071` |
+| macOS Apple Silicon | `FinFanTacRecomp-setup-0.1.0-macos-arm64.zip` | `34cf6771fd10efa4e39baa227fa6ec66c75082a6a34b4fe26fe5450b1229a246` |
+| macOS Intel | `FinFanTacRecomp-setup-0.1.0-macos-x64.zip` | `056904aad79b38618d14ea3a83de6c6390d811f54318d72a3787c6b7f2586d48` |
+
+Linux and macOS packages were built from commit `4f14aa7` by the
+[portable setup workflow](https://github.com/NJH-1001/FinFanTacRecomp/actions/runs/33789539999).

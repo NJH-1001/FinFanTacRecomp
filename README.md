@@ -3,7 +3,7 @@
 An unofficial, noncommercial PSXRecomp compatibility project for **Final Fantasy
 Tactics** (USA, `SCUS-94221`), also called **FinFanTacRecomp**.
 
-**[Download the latest Windows setup kit](https://github.com/NJH-1001/FinFanTacRecomp/releases/latest)**
+**[Download the latest setup kit](https://github.com/NJH-1001/FinFanTacRecomp/releases/latest)**
 
 Releases are **owned-input setup kits**: you supply your legally obtained disc
 and generate the playable executable locally. No disc data, extracted game
