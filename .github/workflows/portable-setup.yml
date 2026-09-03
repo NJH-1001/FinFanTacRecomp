@@ -102,7 +102,7 @@ jobs:
         run: |
           mv "dist/fft-0.1.0-${PLATFORM}.zip" "dist/${OUTPUT}"
           python3 - <<'PY'
-          import hashlib, os, pathlib, zipfile, tomllib
+          import hashlib, os, pathlib, re, zipfile
           archive = pathlib.Path("dist") / os.environ["OUTPUT"]
           with zipfile.ZipFile(archive) as z:
               assert z.testzip() is None
@@ -117,11 +117,20 @@ jobs:
                       assert p.name.lower() == "openbios.bin", name
                   if "generated" in {x.lower() for x in p.parts}:
                       assert "rabbitizer" in name.lower(), name
-              config = tomllib.loads(z.read("game.toml").decode())
-              pad = config["controller"]
-              assert pad["default_mode"] == "digital"
-              assert pad["lock_mode"] is True and pad["allow_hybrid"] is False
-              assert config["runtime"]["bios_hle"] is False
+              config = z.read("game.toml").decode()
+              def section(name):
+                  match = re.search(rf"(?ms)^\[{re.escape(name)}\]\s*(.*?)(?=^\[|\Z)", config)
+                  assert match, name
+                  return match.group(1)
+              def value(body, key):
+                  match = re.search(rf"(?m)^{re.escape(key)}\s*=\s*(.+?)\s*$", body)
+                  assert match, key
+                  return match.group(1).strip()
+              pad = section("controller")
+              assert value(pad, "default_mode") == '"digital"'
+              assert value(pad, "lock_mode") == "true"
+              assert value(pad, "allow_hybrid") == "false"
+              assert value(section("runtime"), "bios_hle") == "false"
           digest = hashlib.sha256(archive.read_bytes()).hexdigest()
           archive.with_suffix(archive.suffix + ".sha256").write_text(f"{digest}  {archive.name}\n")
           print(f"AUDIT PASS: {archive.name} ({archive.stat().st_size} bytes, {digest})")
