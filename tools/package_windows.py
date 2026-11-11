@@ -58,7 +58,8 @@ def main():
     tracked_snapshot((ROOT / "recomp-ui").resolve(), SNAPSHOT / "recomp-ui")
     for name in ("CMakeLists.txt", "game.toml", "game_options.toml", "VERSION",
                  "codegen_setup.c", "codegen_setup.h", "README.md", "RENDERING.md", "VERIFICATION.md", "keybinds.ini",
-                 "gamecontrollerdb.txt", "framework_pins.txt", "psx_symbols.h"):
+                 "gamecontrollerdb.txt", "framework_pins.txt", "psx_symbols.h",
+                 "recomplauncher.json"):
         shutil.copy2(ROOT / name, SNAPSHOT / name)
     for name in ("seeds", "mods", "scripts", "tools", "LICENSES", "src"):
         shutil.copytree(ROOT / name, SNAPSHOT / name, ignore=shutil.ignore_patterns("__pycache__"))

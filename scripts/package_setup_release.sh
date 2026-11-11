@@ -90,6 +90,7 @@ exec bash "${PACKAGER}" \
   --project-file codegen_setup.h \
   --project-file README.md \
   --project-file RENDERING.md \
+  --project-file recomplauncher.json \
   --project-file VERIFICATION.md \
   --project-file keybinds.ini \
   --project-file gamecontrollerdb.txt \

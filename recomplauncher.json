@@ -1,0 +1,35 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Final Fantasy Tactics Recompiled",
+  "repo": "NJH-1001/FinFanTacRecomp",
+  "game": {
+    "kind": "iso",
+    "label": "Your Redump-style CUE sheet (.cue, with its .bin next to it) of the USA release, serial SCUS-94221.",
+    "check": { "ids": ["SCUS-94221"] }
+  },
+  "start": {
+    "program": ["Final_Fantasy_Tactics_Recompiled.exe", "Final_Fantasy_Tactics_Recompiled"],
+    "args": ["--disc", "{game}"]
+  },
+  "prepare": {
+    "program": ["Final_Fantasy_Tactics_Recompiled.exe", "Final_Fantasy_Tactics_Recompiled"],
+    "args": ["--prepare", "--disc", "{game}", "--download-toolchain"],
+    "label": "Building the game from your disc (the first time it also downloads a compiler)",
+    "timeout": 3600
+  },
+  "saves": ["{install}/build-release/saves"],
+  "settings": [
+    {
+      "id": "renderer",
+      "label": "Renderer",
+      "in": "args",
+      "help": "Software is the default and the most tested. OpenGL has been checked with 2x supersampling in the opening scenes.",
+      "choices": [
+        { "label": "Game's option", "args": [] },
+        { "label": "Software", "args": ["--renderer", "software"] },
+        { "label": "OpenGL", "args": ["--renderer", "opengl"] }
+      ]
+    }
+  ]
+}

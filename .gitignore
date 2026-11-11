@@ -81,6 +81,7 @@ starvation_dump.jsonl
 /*.png
 !/catalog_identity.json
 !/disc_probe.json
+!/recomplauncher.json
 
 # Local evidence and generated analysis
 /verification/

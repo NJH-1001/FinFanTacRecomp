@@ -107,6 +107,7 @@ jobs:
           with zipfile.ZipFile(archive) as z:
               assert z.testzip() is None
               names = set(z.namelist())
+              assert "recomplauncher.json" in names
               assert "generated/" not in names and "disc/" not in names
               forbidden = {".cue", ".iso", ".chd", ".mcd", ".mcr", ".sav", ".state"}
               for name in names:

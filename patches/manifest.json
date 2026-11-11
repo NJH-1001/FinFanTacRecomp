@@ -1,10 +1,11 @@
 {
   "framework_base": "a7459cddbe2a869477b0cd5530da8963cf9b5d7d",
-  "patch_sha256": "77fe8824df0ec3401b45ac367cadcd1c7d5839fa4c0b9a1825138956cc29542d",
+  "patch_sha256": "08c2c27160609d1934563b1a3e724423ba6864d9b3796c14f4e41ded98a09f0b",
   "paths": [
     "docs/beetle-linux.md",
     "docs/beetle-oracle.md",
     "docs/beetle_oracle_hooks.patch",
+    "host/psxrecomp_codegen_host.c",
     "recompiler/CMakeLists.txt",
     "recompiler/tests/test_aot_overlay_discovery.py",
     "runtime/CMakeLists.txt",
