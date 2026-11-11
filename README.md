@@ -39,6 +39,12 @@ the setup wizard can download its supported toolchain. Keep the extracted kit
 together. See `README-SETUP.txt` inside the ZIP for setup details. Connect your
 controller before launch and review Player 1's device and bindings in the launcher.
 
+Launchers such as RecompLauncher can run the same Generate and Rebuild without a
+window: `Final_Fantasy_Tactics_Recompiled --prepare --disc <your.cue>`. It prints
+`progress <0 to 1> <text>` lines and exits 0 when the game is built. It only
+downloads a toolchain when `--download-toolchain` is added. Without `--prepare`
+nothing changes.
+
 Linux and macOS are initial native setup-host releases built and smoke-tested on
 GitHub-hosted Ubuntu and macOS runners. Gameplay validation remains strongest on
 Windows; platform-specific controller, audio, rendering and full-game behavior
