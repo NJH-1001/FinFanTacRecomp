@@ -5,6 +5,8 @@ Tactics** (USA, `SCUS-94221`), also called **FinFanTacRecomp**.
 
 **[Download the latest setup kit](https://github.com/NJH-1001/FinFanTacRecomp/releases/latest)**
 
+<a href="https://recomplauncher.com/game/finfantacrecomp"><picture><source media="(prefers-color-scheme: dark)" srcset="https://recomplauncher.com/assets/press/launcher/badge-light.svg"><img alt="Get it on RecompLauncher" src="https://recomplauncher.com/assets/press/launcher/badge-dark.svg" height="48"></picture></a>
+
 Releases are **owned-input setup kits**: you supply your legally obtained disc
 and generate the playable executable locally. No disc data, extracted game
 executable, generated game code, retail PlayStation BIOS, saves, captures, or
