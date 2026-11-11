@@ -11,6 +11,7 @@ TOP_FILES = {
     '.gitattributes', '.gitignore', '.gitmodules', 'CMakeLists.txt', 'README.md',
     'RENDERING.md', 'VERIFICATION.md', 'PUBLICATION.md', 'THIRD_PARTY.md', 'RELEASE_NOTES.md', 'VERSION',
     'catalog_identity.json', 'disc_probe.json', 'framework_pins.txt', 'game.toml',
+    'recomplauncher.json',
     'game_options.toml', 'gamecontrollerdb.txt', 'keybinds.ini', 'codegen_setup.c',
     'codegen_setup.h', 'psx_symbols.h', 'symbols.toml',
 }
