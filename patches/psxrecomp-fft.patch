@@ -5385,10 +5385,10 @@ new file mode 100644
 +if __name__ == '__main__':
 +    raise SystemExit(main())
 diff --git a/host/psxrecomp_codegen_host.c b/host/psxrecomp_codegen_host.c
-index b24d28a..a4753b4 100644
+index b24d28a..9544212 100644
 --- a/host/psxrecomp_codegen_host.c
 +++ b/host/psxrecomp_codegen_host.c
-@@ -4200,6 +4200,176 @@ static int host_paths_same_file(const char* a, const char* b) {
+@@ -4200,6 +4200,183 @@ static int host_paths_same_file(const char* a, const char* b) {
  #endif
  }
  
@@ -5458,6 +5458,7 @@ index b24d28a..a4753b4 100644
 +                               void* progress_ctx) {
 +#if defined(_WIN32)
 +    char cmdline[4096];
++    int len;
 +
 +    activate_toolchain_path();
 +    if (!find_python(g_python, sizeof(g_python))) {
@@ -5471,13 +5472,19 @@ index b24d28a..a4753b4 100644
 +                 g_build_dir);
 +        return 0;
 +    }
-+    snprintf(cmdline, sizeof(cmdline),
-+             "\"%s\" \"%s\" rebuild --project-root \"%s\" --config \"%s\" "
-+             "--build-dir \"%s\" --target \"%s\" --exe-basename \"%s\" "
-+             "--disc \"%s\" --no-pgo --prune-after build-intermediates "
-+             "--json-progress",
-+             g_python, g_cli_path, g_project_root, g_game_toml, g_build_dir,
-+             g_cmake_target, g_exe_basename, disc_path);
++    len = snprintf(cmdline, sizeof(cmdline),
++                   "\"%s\" \"%s\" rebuild --project-root \"%s\" --config \"%s\" "
++                   "--build-dir \"%s\" --target \"%s\" --exe-basename \"%s\" "
++                   "--disc \"%s\" --no-pgo --prune-after build-intermediates "
++                   "--json-progress",
++                   g_python, g_cli_path, g_project_root, g_game_toml,
++                   g_build_dir, g_cmake_target, g_exe_basename, disc_path);
++    if (len < 0 || (size_t)len >= sizeof(cmdline)) {
++        snprintf(err_msg, err_cap,
++                 "The install path is too long. Move the game folder closer "
++                 "to the drive root and retry.");
++        return 0;
++    }
 +    return run_cli_win(cmdline, on_progress, progress_ctx, err_msg, err_cap,
 +                       "psxrecomp rebuild");
 +#else
@@ -5565,7 +5572,7 @@ index b24d28a..a4753b4 100644
  /* Setup-host zip-root exe → build-release product (bios/mods/assets/settings). */
  void psxrecomp_codegen_host_forward_if_built(
      const PsxrecompCodegenHostConfig* cfg, int argc, char** argv) {
-@@ -4214,10 +4384,16 @@ void psxrecomp_codegen_host_forward_if_built(
+@@ -4214,10 +4391,16 @@ void psxrecomp_codegen_host_forward_if_built(
      const char* no_fwd;
      const char* force_env;
      const char* force;
