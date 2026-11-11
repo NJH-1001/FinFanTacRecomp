@@ -12,6 +12,7 @@
     "program": ["Final_Fantasy_Tactics_Recompiled.exe", "Final_Fantasy_Tactics_Recompiled"],
     "args": ["--disc", "{game}"]
   },
+  "saves": ["{install}/build-release/saves"],
   "settings": [
     {
       "id": "renderer",
