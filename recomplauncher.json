@@ -12,6 +12,12 @@
     "program": ["Final_Fantasy_Tactics_Recompiled.exe", "Final_Fantasy_Tactics_Recompiled"],
     "args": ["--disc", "{game}"]
   },
+  "prepare": {
+    "program": ["Final_Fantasy_Tactics_Recompiled.exe", "Final_Fantasy_Tactics_Recompiled"],
+    "args": ["--prepare", "--disc", "{game}", "--download-toolchain"],
+    "label": "Building the game from your disc (the first time it also downloads a compiler)",
+    "timeout": 3600
+  },
   "saves": ["{install}/build-release/saves"],
   "settings": [
     {
